@@ -1,0 +1,304 @@
+<h1 align="center">
+  <img src="https://github.com/user-attachments/assets/60afcee1-049a-4d2c-845d-8953b4fae083" alt="" width="120" valign="middle">
+  <br>
+  Vector Graph RAG
+</h1>
+
+<p align="center">
+  <strong>Graph RAG with pure vector search — no graph database needed.</strong>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/vector-graph-rag/"><img src="https://img.shields.io/pypi/v/vector-graph-rag?style=flat-square&color=blue" alt="PyPI"></a>
+  <a href="https://pypi.org/project/vector-graph-rag/"><img src="https://img.shields.io/badge/python-%3E%3D3.10-blue?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
+  <a href="https://github.com/zilliztech/vector-graph-rag/blob/main/LICENSE"><img src="https://img.shields.io/github/license/zilliztech/vector-graph-rag?style=flat-square" alt="License"></a>
+  <a href="https://zilliztech.github.io/vector-graph-rag/"><img src="https://img.shields.io/badge/docs-vector--graph--rag-blue?style=flat-square" alt="Docs"></a>
+  <a href="https://github.com/zilliztech/vector-graph-rag/stargazers"><img src="https://img.shields.io/github/stars/zilliztech/vector-graph-rag?style=flat-square" alt="Stars"></a>
+  <a href="https://discord.com/invite/FG6hMJStWu"><img src="https://img.shields.io/badge/Discord-chat-7289da?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
+</p>
+
+> 💡 Encode entities and relations as vectors in [Milvus](https://milvus.io/), replace iterative LLM agents with a single reranking pass — achieve state-of-the-art multi-hop retrieval at a fraction of the operational and computational cost.
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/1185b651-ed72-4408-9dcd-25a74b12835b" alt="Vector Graph RAG Demo" width="800">
+</p>
+
+## ✨ Features
+
+- **No Graph Database Required** — Pure vector search with Milvus, no Neo4j or other graph databases needed
+- **Single-Pass LLM Reranking** — One LLM call to rerank, no iterative agent loops (unlike IRCoT or multi-step reflection)
+- **Knowledge-Intensive Friendly** — Optimized for domains with dense factual content: legal, finance, medical, literature, etc.
+- **Zero Configuration** — Uses Milvus Lite by default, works out of the box with a single file
+- **Multi-hop Reasoning** — Subgraph expansion enables complex multi-hop question answering
+- **State-of-the-Art Performance** — 87.8% avg Recall@5 on multi-hop QA benchmarks, outperforming HippoRAG
+- **Web Console** — Multi-page React UI for ingestion, document search, graph stats, streaming queries, and Markdown answers
+
+## 📦 Installation
+
+```bash
+pip install vector-graph-rag
+# or
+uv add vector-graph-rag
+```
+
+<details>
+<summary><b>With document loaders (PDF, DOCX, web pages)</b></summary>
+
+```bash
+pip install "vector-graph-rag[loaders]"
+# or
+uv add "vector-graph-rag[loaders]"
+```
+
+</details>
+
+## 🚀 Quick Start
+
+```python
+from vector_graph_rag import VectorGraphRAG
+
+rag = VectorGraphRAG()  # reads OPENAI_API_KEY from environment
+
+rag.add_texts([
+    "Albert Einstein developed the theory of relativity.",
+    "The theory of relativity revolutionized our understanding of space and time.",
+])
+
+result = rag.query("What did Einstein develop?")
+print(result.answer)
+```
+
+> **Note:** Set `OPENAI_API_KEY` environment variable before running.
+
+<details>
+<summary>📄 <b>With pre-extracted triplets</b> — click to expand</summary>
+
+Skip LLM extraction if you already have knowledge graph triplets:
+
+```python
+rag.add_documents_with_triplets([
+    {
+        "passage": "Einstein developed relativity at Princeton.",
+        "triplets": [
+            ["Einstein", "developed", "relativity"],
+            ["Einstein", "worked at", "Princeton"],
+        ],
+    },
+])
+```
+
+</details>
+
+<details>
+<summary>🌐 <b>Import from URLs and files</b> — click to expand</summary>
+
+```python
+from vector_graph_rag import VectorGraphRAG
+from vector_graph_rag.loaders import DocumentImporter
+
+# Import from URLs, PDFs, DOCX, etc. (with automatic chunking)
+importer = DocumentImporter(chunk_size=1000, chunk_overlap=200)
+result = importer.import_sources([
+    "https://en.wikipedia.org/wiki/Albert_Einstein",
+    "/path/to/document.pdf",
+    "/path/to/report.docx",
+])
+
+rag = VectorGraphRAG(milvus_uri="./my_graph.db")
+rag.add_documents(result.documents, extract_triplets=True)
+
+result = rag.query("What did Einstein discover?")
+print(result.answer)
+```
+
+</details>
+
+<details>
+<summary>⚙️ <b>Custom configuration</b> — click to expand</summary>
+
+```python
+rag = VectorGraphRAG(
+    milvus_uri="./my_data.db",          # or remote Milvus / Zilliz Cloud
+    llm_model="gpt-4o",
+    embedding_model="text-embedding-3-large",
+    collection_prefix="my_project",     # isolate multiple datasets
+)
+```
+
+All settings can also be configured via environment variables with `VGRAG_` prefix or a `.env` file:
+
+```bash
+VGRAG_LLM_MODEL=gpt-4o
+VGRAG_EMBEDDING_MODEL=text-embedding-3-large
+VGRAG_MILVUS_URI=http://localhost:19530
+# Optional: default Milvus collection prefix when graph_name is omitted (see README “Graph naming”)
+# VGRAG_COLLECTION_PREFIX=myproj
+# Optional: Milvus consistency (also used in stats count(*) fallback order after Strong)
+# VGRAG_MILVUS_CONSISTENCY_LEVEL=Bounded
+```
+
+</details>
+
+> 📖 Full Python API reference → [Python API docs](https://zilliztech.github.io/vector-graph-rag/python-api/)
+
+## 🔬 How It Works
+
+**Indexing:**
+
+```
+Documents → Triplet Extraction (LLM) → Entities + Relations → Embedding → Milvus
+```
+
+**Query:**
+
+```
+Question → Entity Extraction → Vector Search → Subgraph Expansion → LLM Reranking → Answer
+```
+
+**Example:** *"What did Einstein develop?"*
+
+1. Extract entity: `Einstein`
+2. Vector search finds similar entities and relations in Milvus
+3. Subgraph expansion collects neighboring relations
+4. **Single-pass LLM reranking** selects the most relevant passages
+5. Generate answer from selected passages
+
+> 📖 Detailed pipeline walkthrough with diagrams → [How It Works](https://zilliztech.github.io/vector-graph-rag/how-it-works/) · [Design Philosophy](https://zilliztech.github.io/vector-graph-rag/design-philosophy/)
+
+## 📊 Evaluation Results
+
+Evaluated on three multi-hop QA benchmarks (Recall@5):
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/221a0c8d-a414-4234-ac8b-ba4223aaa2cc" alt="Recall@5: Naive RAG vs Vector Graph RAG" width="700">
+</p>
+
+| Method | MuSiQue | HotpotQA | 2WikiMultiHopQA | Average |
+|--------|---------|----------|-----------------|---------|
+| Naive RAG | 55.6% | 90.8% | 73.7% | 73.4% |
+| IRCoT + HippoRAG¹ | 57.6% | 83.0% | 93.9% | 78.2% |
+| HippoRAG 2² | **74.7%** | **96.3%** | 90.4% | 87.1% |
+| **Vector Graph RAG** | 73.0% | **96.3%** | **94.1%** | **87.8%** |
+
+¹ [HippoRAG (NeurIPS 2024)](https://arxiv.org/abs/2405.14831)  ² [HippoRAG 2 (2025)](https://arxiv.org/abs/2502.14802)
+
+> 📖 Detailed analysis and reproduction steps → [Evaluation](https://zilliztech.github.io/vector-graph-rag/evaluation/)
+
+## 🗄️ Milvus Backend
+
+Just change `milvus_uri` to switch between deployment modes:
+
+**Milvus Lite** (default) — zero config, single-process, data stored in a local file. Great for prototyping and small datasets:
+
+```python
+rag = VectorGraphRAG(milvus_uri="./my_graph.db")  # just works
+```
+
+⭐ **Zilliz Cloud** — fully managed, [free tier available](https://cloud.zilliz.com/signup?utm_source=github&utm_medium=referral&utm_campaign=vector-graph-rag-readme) — [sign up](https://cloud.zilliz.com/signup?utm_source=github&utm_medium=referral&utm_campaign=vector-graph-rag-readme) 👇:
+
+```python
+rag = VectorGraphRAG(
+    milvus_uri="https://in03-xxx.api.gcp-us-west1.zillizcloud.com",
+    milvus_token="your-api-key",
+)
+```
+
+<details>
+<summary>⭐ Sign up for a free Zilliz Cloud cluster</summary>
+
+You can [sign up](https://cloud.zilliz.com/signup?utm_source=github&utm_medium=referral&utm_campaign=vector-graph-rag-readme) on Zilliz Cloud to get a free cluster and API key.
+
+![Sign up and get API key](https://raw.githubusercontent.com/zilliztech/CodeIndexer/master/assets/signup_and_get_apikey.png)
+
+</details>
+
+<details>
+<summary>Self-hosted Milvus Server (Docker) — for advanced users</summary>
+
+If you need a dedicated Milvus instance for multi-user or team environments, you can deploy Milvus standalone with Docker Compose. This requires Docker and some infrastructure knowledge. See the [official installation guide](https://milvus.io/docs/install_standalone-docker-compose.md) for detailed steps.
+
+```python
+rag = VectorGraphRAG(milvus_uri="http://localhost:19530")
+```
+
+</details>
+
+## 🖥️ Frontend & REST API
+
+Vector Graph RAG ships with a **React + TypeScript + Vite** web UI and a **FastAPI** backend. The UI uses a **multi-page layout** (sidebar navigation) so you can operate every exposed endpoint without writing scripts.
+
+**Web UI pages**
+
+| Route | Purpose |
+|-------|---------|
+| `/dashboard` | System health, settings summary, graph overview |
+| `/query` | Query workbench: question input, optional **SSE streaming**, retrieval timeline, **Markdown-rendered** answer, subgraph visualization |
+| `/knowledge-bases` | List graphs, view stats, delete a knowledge base |
+| `/documents` | Search passages (`GET /documents?q=…`), view / edit / delete by ID |
+| `/ingestion` | Add text (`POST /add_documents`), import URLs or paths (`POST /import`), file upload (`POST /upload`) |
+
+**Ingestion & Milvus graph naming**
+
+- **Append, not replace:** `add_documents`, `import`, and `upload` **append** rows to the target collections. The Python `VectorGraphRAG.add_documents` / `add_texts` APIs behave the same way. To remove an entire dataset, use `DELETE /graph/{name}` (or the UI).
+- **`GET /graphs` graph `name`:** **`unprefixed`** means the bare triplet `vgrag_entities` / `vgrag_relations` / `vgrag_passages` (no `collection_prefix`). Any other string (including **`default`**) is the **literal** Milvus prefix, e.g. `default` → `default_vgrag_*`. This avoids confusing “default graph” with “prefix named `default`”.
+- **`VGRAG_COLLECTION_PREFIX` (.env):** When an API call **omits** `graph_name` (e.g. some query paths), the server uses this value as `collection_prefix`. It does **not** override an explicit `graph_name` you send from the ingestion form.
+- **Ingestion “target knowledge base”:** Passed as `graph_name`. A **new** name not yet listed in `GET /graphs` will still **create** `{name}_vgrag_*` on first successful write. Use names that match `/graphs` or your header selector; avoid treating **`unprefixed`** as a casual project label.
+
+**Knowledge base stats (`GET /graph/{name}/stats`)**
+
+Counts are computed with **`load_collection`** plus **`query(..., output_fields=["count(*)"])`**, trying **`Strong`** consistency first (then `VGRAG_MILVUS_CONSISTENCY_LEVEL`, `Bounded`, `Eventually`, `Session`), because Milvus **`get_collection_stats` / segment `row_count` alone often under-counts** (e.g. growing segments). If aggregation fails, the API falls back to segment statistics.
+
+**Run locally**
+
+```bash
+# Backend (from repo root; install package in editable mode if needed: pip install -e .)
+uv sync --extra api
+uv run uvicorn vector_graph_rag.api.app:app --host 0.0.0.0 --port 8000
+
+# Frontend — dev server proxies /api → FastAPI (see frontend/vite.config.ts)
+cd frontend && npm install && npm run dev
+```
+
+The frontend Axios client uses `baseURL: '/api'`. In **development**, Vite rewrites `/api/*` to `http://localhost:<port>/*` on the backend (default port from repo-root `.env`: `VGRAG_API_PORT`, else `8000`). **Production** builds that talk to FastAPI directly should either serve the API behind the same host under `/api` or change the client `baseURL` / reverse-proxy rules to match.
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/8cc8e594-aed7-4ef5-8c3b-e5ff54275b64" alt="Frontend — interactive graph visualization with 4-step retrieval" width="800">
+</p>
+
+**REST endpoints** on the FastAPI app (paths below are relative to the API root, e.g. `http://localhost:8000/...`). When using `npm run dev`, call them from the browser as `/api/...` so the Vite proxy forwards correctly.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/settings` | GET | Non-secret configuration (models, Milvus URI, etc.) |
+| `/graphs` | GET | List available graphs / collection sets |
+| `/graph/{name}` | DELETE | Drop a graph and its Milvus collections |
+| `/graph/{name}/stats` | GET | Entity / relation / passage counts |
+| `/graph/{name}/neighbors/{entity_id}` | GET | Neighbors of an entity (lazy expansion) |
+| `/add_documents` | POST | Add raw text documents (optional triplets) |
+| `/import` | POST | Import from URLs or file paths (server-side) |
+| `/upload` | POST | Multipart file upload |
+| `/documents` | GET | Vector search over passages (`query`, `top_k`, optional `graph_name`) |
+| `/documents/{id}` | GET / PUT / DELETE | Read, update, or delete one document |
+| `/query` | POST | Full Graph RAG query (JSON response with subgraph) |
+| `/query/stream` | POST | Same query as **Server-Sent Events** (tokens/progress); the UI may follow with `/query` when the stream `done` payload omits the full subgraph for visualization |
+
+Open **interactive API docs** at `http://localhost:8000/docs` after starting the server.
+
+> 📖 Full endpoint reference → [REST API docs](https://zilliztech.github.io/vector-graph-rag/rest-api/) · [Frontend guide](https://zilliztech.github.io/vector-graph-rag/frontend/)
+
+## 📚 Links
+
+- [Documentation](https://zilliztech.github.io/vector-graph-rag/) — full guides, API reference, and architecture details
+- [How It Works](https://zilliztech.github.io/vector-graph-rag/how-it-works/) — pipeline walkthrough with diagrams
+- [Design Philosophy](https://zilliztech.github.io/vector-graph-rag/design-philosophy/) — why pure vector search, no graph DB
+- [Milvus](https://milvus.io/) — the vector database powering Vector Graph RAG
+- [FAQ](https://zilliztech.github.io/vector-graph-rag/faq/) — common questions and troubleshooting
+
+## Contributing
+
+Bug reports, feature requests, and pull requests are welcome! For questions and discussions, join us on [Discord](https://discord.com/invite/FG6hMJStWu).
+
+## 📄 License
+
+[MIT](LICENSE)

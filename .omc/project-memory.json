@@ -1,0 +1,237 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1776911134164,
+  "projectRoot": "d:\\project\\Milvus\\vector-graph-rag",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "pyproject.toml"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "fastapi",
+        "version": null,
+        "category": "backend"
+      },
+      {
+        "name": "pytest",
+        "version": null,
+        "category": "testing"
+      }
+    ],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "pytest",
+    "lintCommand": "ruff check",
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "src",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "api": {
+      "path": "api",
+      "purpose": "API routes",
+      "fileCount": 3,
+      "lastAccessed": 1776911134121,
+      "keyFiles": [
+        "main.py",
+        "schemas.py",
+        "__init__.py"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 10,
+      "lastAccessed": 1776911134122,
+      "keyFiles": [
+        "design-philosophy.md",
+        "evaluation.md",
+        "faq.md",
+        "frontend.md",
+        "getting-started.md"
+      ]
+    },
+    "evaluation": {
+      "path": "evaluation",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1776911134123,
+      "keyFiles": [
+        "evaluate.py",
+        "README.md"
+      ]
+    },
+    "frontend": {
+      "path": "frontend",
+      "purpose": null,
+      "fileCount": 10,
+      "lastAccessed": 1776911134123,
+      "keyFiles": [
+        "eslint.config.js",
+        "index.html",
+        "package-lock.json",
+        "package.json",
+        "README.md"
+      ]
+    },
+    "llm_cache": {
+      "path": "llm_cache",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776911134124,
+      "keyFiles": [
+        "Pro-zai-org-GLM-5_1.json"
+      ]
+    },
+    "pdf": {
+      "path": "pdf",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776911134124,
+      "keyFiles": [
+        "demo.pdf"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 0,
+      "lastAccessed": 1776911134125,
+      "keyFiles": []
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 5,
+      "lastAccessed": 1776911134126,
+      "keyFiles": [
+        "conftest.py",
+        "test_api.py",
+        "test_graph.py",
+        "test_milvus_store.py",
+        "__init__.py"
+      ]
+    },
+    "docs\\assets": {
+      "path": "docs\\assets",
+      "purpose": "Static assets",
+      "fileCount": 2,
+      "lastAccessed": 1776911134128,
+      "keyFiles": [
+        "logo.png",
+        "logo.svg"
+      ]
+    },
+    "evaluation\\data": {
+      "path": "evaluation\\data",
+      "purpose": "Data files",
+      "fileCount": 12,
+      "lastAccessed": 1776911134129,
+      "keyFiles": [
+        "2wikimultihopqa.json",
+        "2wikimultihopqa_corpus.json",
+        "hotpotqa.json"
+      ]
+    },
+    "frontend\\public": {
+      "path": "frontend\\public",
+      "purpose": "Public files",
+      "fileCount": 1,
+      "lastAccessed": 1776911134130,
+      "keyFiles": [
+        "vite.svg"
+      ]
+    },
+    "frontend\\src": {
+      "path": "frontend\\src",
+      "purpose": "Source code",
+      "fileCount": 4,
+      "lastAccessed": 1776911134130,
+      "keyFiles": [
+        "App.css",
+        "App.tsx",
+        "index.css"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "",
+      "accessCount": 4,
+      "lastAccessed": 1776923395670,
+      "type": "directory"
+    },
+    {
+      "path": "src\\vector_graph_rag\\loaders\\url_fetcher.py",
+      "accessCount": 3,
+      "lastAccessed": 1776911267603,
+      "type": "file"
+    },
+    {
+      "path": "src\\vector_graph_rag\\rag.py",
+      "accessCount": 2,
+      "lastAccessed": 1776923376050,
+      "type": "file"
+    },
+    {
+      "path": "demo.py",
+      "accessCount": 1,
+      "lastAccessed": 1776911233389,
+      "type": "file"
+    },
+    {
+      "path": "pyproject.toml",
+      "accessCount": 1,
+      "lastAccessed": 1776911233411,
+      "type": "file"
+    },
+    {
+      "path": "src\\vector_graph_rag\\loaders\\__init__.py",
+      "accessCount": 1,
+      "lastAccessed": 1776911247124,
+      "type": "file"
+    },
+    {
+      "path": "api\\main.py",
+      "accessCount": 1,
+      "lastAccessed": 1776923359531,
+      "type": "file"
+    },
+    {
+      "path": "src\\vector_graph_rag\\llm\\reranker.py",
+      "accessCount": 1,
+      "lastAccessed": 1776923407476,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -42,31 +42,14 @@ export function ImportDialog({ open, onClose, onImportComplete }: ImportDialogPr
   })
   const [isImporting, setIsImporting] = useState(false)
   const [progress, setProgress] = useState(0)
-  const [selectedGraph, setSelectedGraph] = useState<string>('')
+  const [selectedGraph, setSelectedGraph] = useState<string>('default')
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const { toast } = useToast()
   const { data: graphsData } = useGraphs()
 
   const existingGraphs = graphsData?.graphs.map((g) => g.name) || []
 
-  useEffect(() => {
-    const ready = graphsData?.graphs.filter((g) => g.has_all_collections) || []
-    const names = ready.map((g) => g.name)
-    if (!names.length) return
-    if (!selectedGraph || !names.includes(selectedGraph)) {
-      setSelectedGraph(names[0])
-    }
-  }, [graphsData, selectedGraph])
-
   const handleImport = async () => {
-    if (!selectedGraph) {
-      toast({
-        title: '请选择知识库',
-        description: '等待知识库列表加载完成后再导入',
-        variant: 'destructive',
-      })
-      return
-    }
     if ((mode === 'file' && files.length === 0) || (mode === 'url' && urls.length === 0)) {
       toast({
         title: 'No sources',
@@ -141,9 +124,9 @@ export function ImportDialog({ open, onClose, onImportComplete }: ImportDialogPr
     <Dialog open={open} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>导入文档</DialogTitle>
+          <DialogTitle>Import Documents</DialogTitle>
           <DialogDescription>
-            从文件或网页链接导入文本文档到知识图谱中
+            Import text documents from files or URLs into the knowledge graph
           </DialogDescription>
         </DialogHeader>
 
@@ -161,8 +144,8 @@ export function ImportDialog({ open, onClose, onImportComplete }: ImportDialogPr
 
         <Tabs value={mode} onValueChange={(v) => setMode(v as 'file' | 'url')}>
           <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="file">上传文件</TabsTrigger>
-            <TabsTrigger value="url">导入链接</TabsTrigger>
+            <TabsTrigger value="file">Upload Files</TabsTrigger>
+            <TabsTrigger value="url">Import URLs</TabsTrigger>
           </TabsList>
 
           <TabsContent value="file" className="space-y-4 mt-4">
@@ -184,7 +167,7 @@ export function ImportDialog({ open, onClose, onImportComplete }: ImportDialogPr
 
         <div className="flex justify-end gap-2 mt-4">
           <Button variant="outline" onClick={onClose} disabled={isImporting}>
-            取消
+            Cancel
           </Button>
           <Button
             onClick={handleImport}
@@ -194,7 +177,7 @@ export function ImportDialog({ open, onClose, onImportComplete }: ImportDialogPr
               (mode === 'url' && urls.length === 0)
             }
           >
-            {isImporting ? '导入中...' : '导入'}
+            {isImporting ? 'Importing...' : 'Import'}
           </Button>
         </div>
       </DialogContent>

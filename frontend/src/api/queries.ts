@@ -18,14 +18,13 @@ export const useSearch = () => {
 
   return useMutation({
     mutationFn: (request: QueryRequest) => api.query(request),
-    onSuccess: (data, request) => {
-      const graphName = request.graph_name
-      if (!graphName) return
-      const topEntities = data.subgraph?.entities.slice(0, 5) || []
+    onSuccess: (data) => {
+      // Prefetch neighbors for top entities
+      const topEntities = data.subgraph.entities.slice(0, 5)
       topEntities.forEach((entity) => {
         queryClient.prefetchQuery({
-          queryKey: queryKeys.neighbors(entity.id, graphName),
-          queryFn: () => api.getNeighbors(entity.id, graphName),
+          queryKey: queryKeys.neighbors(entity.id, 'default'),
+          queryFn: () => api.getNeighbors(entity.id),
           staleTime: 5 * 60 * 1000, // 5 minutes
         })
       })
@@ -34,18 +33,21 @@ export const useSearch = () => {
 }
 
 // Graph stats query
-export const useGraphStats = (graphName: string, enabled: boolean = true) => {
+export const useGraphStats = (graphName: string = 'default') => {
   return useQuery({
     queryKey: queryKeys.graphStats(graphName),
     queryFn: () => api.getGraphStats(graphName),
-    enabled: enabled && !!graphName,
     staleTime: 60 * 1000, // 1 minute
     retry: 1,
   })
 }
 
 // Neighbors query
-export const useNeighbors = (entityId: string, graphName: string, enabled: boolean = true) => {
+export const useNeighbors = (
+  entityId: string,
+  graphName: string = 'default',
+  enabled: boolean = true
+) => {
   return useQuery({
     queryKey: queryKeys.neighbors(entityId, graphName),
     queryFn: () => api.getNeighbors(entityId, graphName),

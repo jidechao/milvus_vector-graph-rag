@@ -59,7 +59,7 @@ interface GraphState {
 
   // Actions
   setSubgraph: (
-    subgraph: SubGraph | null,
+    subgraph: SubGraph,
     retrievalDetail?: RetrievalDetail,
     rerankResult?: RerankResult
   ) => void
@@ -281,18 +281,6 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   // Actions
   setSubgraph: (subgraph, retrievalDetail, rerankResult) => {
-    if (!subgraph) {
-      set({
-        subgraph: null,
-        retrievalDetail: retrievalDetail || null,
-        rerankResult: rerankResult || null,
-        currentNodeStatus: null,
-        nodes: [],
-        edges: [],
-      })
-      return
-    }
-
     // Build with all nodes visible (final step status)
     const finalStatus: StepNodeStatus = {
       seedEntityIds: retrievalDetail?.entity_ids || [],

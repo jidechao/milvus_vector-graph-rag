@@ -3,13 +3,15 @@ LLM-based reranking for candidate relations.
 """
 
 import json
-from typing import Iterator, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from vector_graph_rag.config import Settings, get_settings
 from vector_graph_rag.llm.cache import LLMCache, get_llm_cache
+from vector_graph_rag.llm.generation import generate_text
+from vector_graph_rag.observability import start_span
 
 RERANK_EXAMPLE_1_INPUT = """I will provide you with a set of relationship descriptions from a knowledge graph. Select exactly 5 relationships most useful for answering this multi-hop question.
 
@@ -69,7 +71,12 @@ Relationship descriptions:
 
 RERANK_EXAMPLE_3_OUTPUT = """{"thought_process": "3-hop question: (1) Find award won by The Hurt Locker ([5]: Academy Award Best Picture), (2) Find another film with same award ([12]: Moonlight), (3) Find director ([15]: Barry Jenkins).", "useful_relations": ["[5] the hurt locker won academy award best picture", "[12] moonlight won academy award best picture", "[15] moonlight directed by barry jenkins", "[8] the hurt locker directed by kathryn bigelow", "[25] barry jenkins born in miami"]}"""
 
-RERANK_PROMPT_TEMPLATE = """Question:
+RERANK_PROMPT_TEMPLATE = """Select up to 5 of the supplied relationships, most useful first.
+Return a JSON object with "thought_process" and "useful_relations".
+"useful_relations" must be an array of the original relation lines including their [ID].
+Use only supplied relationships; if fewer than 5 are available, return fewer.
+
+Question:
 {question}
 
 Relationship descriptions:
@@ -124,7 +131,7 @@ class LLMReranker:
             use_cache: Whether to use LLM response caching (default: from settings).
             cache: Custom cache instance.
         """
-        self.settings = settings or get_settings()
+        self.settings = (settings or get_settings()).for_task("reranker")
         self.settings.validate_settings()
 
         self.model = model or self.settings.llm_model
@@ -173,7 +180,9 @@ class LLMReranker:
 
         # Check cache
         if self.cache:
-            cached = self.cache.get(self.model, cache_key, temperature=0)
+            cached = self.cache.get(
+                self.settings.cache_model_name(self.model), cache_key, temperature=0
+            )
             if cached is not None:
                 return cached
 
@@ -188,24 +197,21 @@ class LLMReranker:
             {"role": "user", "content": prompt},
         ]
 
-        # Build API call kwargs
-        api_kwargs = {
-            "model": self.model,
-            "messages": messages,
-            "response_format": {"type": "json_object"},
-        }
-
-        # gpt-5 series doesn't support 'temperature' and 'stop' parameters
-        if not self.model.startswith("gpt-5"):
-            api_kwargs["temperature"] = 0
-            api_kwargs["stop"] = ["\n\n"]
-
-        response = self.client.chat.completions.create(**api_kwargs)
-        result = response.choices[0].message.content or "{}"
+        result = generate_text(
+            self.client,
+            settings=self.settings,
+            model=self.model,
+            messages=messages,
+            json_mode=True,
+            temperature=0,
+            stop=["\n\n"],
+        )
 
         # Store in cache
         if self.cache:
-            self.cache.set(self.model, cache_key, result, temperature=0)
+            self.cache.set(
+                self.settings.cache_model_name(self.model), cache_key, result, temperature=0
+            )
 
         return result
 
@@ -264,26 +270,32 @@ class LLMReranker:
         if not relation_ids:
             return [], []
 
-        # Format relations
-        relation_descriptions = self._format_relations(relation_ids, relation_texts)
+        with start_span(
+            "vgrag.rerank",
+            {
+                "vgrag.llm_model": self.model,
+                "vgrag.question_length": len(query),
+                "vgrag.candidate_relation_count": len(relation_ids),
+                "vgrag.use_llm_cache": self.use_cache,
+            },
+        ):
+            # Format relations
+            relation_descriptions = self._format_relations(relation_ids, relation_texts)
 
-        # Call LLM
-        response = self._call_llm(query, relation_descriptions)
+            # Call LLM
+            response = self._call_llm(query, relation_descriptions)
 
-        # Parse response
-        valid_ids = set(relation_ids)
-        selected_ids = self._parse_response(response, valid_ids, relation_ids, relation_texts)
+            # Parse response
+            valid_ids = set(relation_ids)
+            selected_ids = self._parse_response(response, valid_ids, relation_ids, relation_texts)
 
-        # Fallback: if parsing produced nothing, keep top-N candidates so retrieval can continue.
-        if not selected_ids:
-            fallback_n = min(5, len(relation_ids))
-            selected_ids = relation_ids[:fallback_n]
+            # No fallback - return whatever LLM selected (same as current project)
 
-        # Get corresponding texts
-        id_to_text = dict(zip(relation_ids, relation_texts))
-        selected_texts = [id_to_text[rid] for rid in selected_ids if rid in id_to_text]
+            # Get corresponding texts
+            id_to_text = dict(zip(relation_ids, relation_texts))
+            selected_texts = [id_to_text[rid] for rid in selected_ids if rid in id_to_text]
 
-        return selected_ids, selected_texts
+            return selected_ids, selected_texts
 
 
 class AnswerGenerator:
@@ -315,7 +327,7 @@ Answer:"""
             use_cache: Whether to use LLM response caching (default: from settings).
             cache: Custom cache instance.
         """
-        self.settings = settings or get_settings()
+        self.settings = (settings or get_settings()).for_task("answer")
         self.settings.validate_settings()
 
         self.model = model or self.settings.llm_model
@@ -344,77 +356,41 @@ Answer:"""
         Returns:
             Generated answer string.
         """
-        context = "\n\n".join(passages)
-        prompt = self.ANSWER_PROMPT.format(question=query, context=context)
+        with start_span(
+            "vgrag.answer",
+            {
+                "vgrag.llm_model": self.model,
+                "vgrag.question_length": len(query),
+                "vgrag.passage_count": len(passages),
+                "vgrag.context_length": sum(len(passage) for passage in passages),
+                "vgrag.use_llm_cache": self.use_cache,
+            },
+        ):
+            context = "\n\n".join(passages)
+            prompt = self.ANSWER_PROMPT.format(question=query, context=context)
 
-        # Check cache
-        if self.cache:
-            cached = self.cache.get(self.model, prompt, temperature=0)
-            if cached is not None:
-                return cached
+            # Check cache
+            if self.cache:
+                cached = self.cache.get(
+                    self.settings.cache_model_name(self.model), prompt, temperature=0
+                )
+                if cached is not None:
+                    return cached
 
-        messages = [{"role": "user", "content": prompt}]
+            messages = [{"role": "user", "content": prompt}]
 
-        # Build API call kwargs - gpt-5 series doesn't support temperature parameter
-        api_kwargs = {
-            "model": self.model,
-            "messages": messages,
-        }
-        if not self.model.startswith("gpt-5"):
-            api_kwargs["temperature"] = 0
+            result = generate_text(
+                self.client,
+                settings=self.settings,
+                model=self.model,
+                messages=messages,
+                temperature=0,
+            )
 
-        response = self.client.chat.completions.create(**api_kwargs)
+            # Store in cache
+            if self.cache:
+                self.cache.set(
+                    self.settings.cache_model_name(self.model), prompt, result, temperature=0
+                )
 
-        result = response.choices[0].message.content or "I don't know."
-
-        # Store in cache
-        if self.cache:
-            self.cache.set(self.model, prompt, result, temperature=0)
-
-        return result
-
-    def generate_stream(self, query: str, passages: List[str]) -> Iterator[str]:
-        """
-        Stream answer tokens based on query and context.
-
-        Args:
-            query: The query text.
-            passages: Retrieved passages for context.
-
-        Yields:
-            Incremental answer text chunks.
-        """
-        context = "\n\n".join(passages)
-        prompt = self.ANSWER_PROMPT.format(question=query, context=context)
-
-        # Cache hit: stream as a single chunk to keep behavior deterministic.
-        if self.cache:
-            cached = self.cache.get(self.model, prompt, temperature=0)
-            if cached is not None:
-                yield cached
-                return
-
-        messages = [{"role": "user", "content": prompt}]
-
-        api_kwargs = {
-            "model": self.model,
-            "messages": messages,
-            "stream": True,
-        }
-        if not self.model.startswith("gpt-5"):
-            api_kwargs["temperature"] = 0
-
-        stream = self.client.chat.completions.create(**api_kwargs)
-
-        chunks: List[str] = []
-        for event in stream:
-            if not event.choices:
-                continue
-            delta = event.choices[0].delta.content
-            if delta:
-                chunks.append(delta)
-                yield delta
-
-        # Save assembled output into cache.
-        if self.cache and chunks:
-            self.cache.set(self.model, prompt, "".join(chunks), temperature=0)
+            return result

@@ -7,15 +7,6 @@ import type {
   ListGraphsResponse,
   SystemSettings,
   DeleteResponse,
-  DocumentResponse,
-  ListDocumentsResponse,
-  UpdateDocumentRequest,
-  AddDocumentsRequest,
-  AddDocumentsResponse,
-  ImportRequest,
-  ImportResponse,
-  UploadOptions,
-  StreamEvent,
 } from '@/types/api'
 
 const apiClient = axios.create({
@@ -34,106 +25,28 @@ export const api = {
     return response.data
   },
 
-  // Query Stream
-  queryStream: (
-    request: QueryRequest,
-    onMessage: (event: StreamEvent) => void,
-    onError: (error: Error) => void,
-    onComplete: () => void
-  ) => {
-    const { graph_name, ...body } = request
-    const url = new URL('/api/query/stream', window.location.origin)
-    if (graph_name) {
-      url.searchParams.append('graph_name', graph_name)
-    }
-
-    let isAborted = false
-
-    const fetchStream = async () => {
-      try {
-        const response = await fetch(url.toString(), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(body),
-        })
-
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`)
-        }
-
-        const reader = response.body?.getReader()
-        if (!reader) throw new Error('No reader available')
-
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        while (!isAborted) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n\n')
-          buffer = lines.pop() || ''
-
-          for (const line of lines) {
-            if (line.trim() === '') continue
-            
-            const dataMatch = line.match(/data:\s*(.*)/)
-            
-            if (dataMatch) {
-              try {
-                const data = JSON.parse(dataMatch[1]) as StreamEvent
-                onMessage(data)
-              } catch (e) {
-                console.error('Failed to parse SSE data:', e)
-              }
-            }
-          }
-        }
-        
-        if (!isAborted) {
-          onComplete()
-        }
-      } catch (error) {
-        if (!isAborted) {
-          onError(error instanceof Error ? error : new Error(String(error)))
-        }
-      }
-    }
-
-    fetchStream()
-
-    return () => {
-      isAborted = true
-    }
-  },
-
   // Get graph statistics
-  getGraphStats: async (graphName: string): Promise<GraphStats> => {
-    const response = await apiClient.get<GraphStats>(
-      `/graph/${encodeURIComponent(graphName)}/stats`
-    )
+  getGraphStats: async (graphName: string = 'default'): Promise<GraphStats> => {
+    const response = await apiClient.get<GraphStats>(`/graph/${graphName}/stats`)
     return response.data
   },
 
   // Get entity neighbors (for lazy loading graph expansion)
   getNeighbors: async (
     entityId: string,
-    graphName: string,
+    graphName: string = 'default',
     limit: number = 20
   ): Promise<NeighborResponse> => {
     const response = await apiClient.get<NeighborResponse>(
-      `/graph/${encodeURIComponent(graphName)}/neighbors/${encodeURIComponent(entityId)}`,
+      `/graph/${graphName}/neighbors/${entityId}`,
       { params: { limit } }
     )
     return response.data
   },
 
   // Health check
-  health: async (): Promise<{ status: string; version: string }> => {
-    const response = await apiClient.get<{ status: string; version: string }>('/health')
+  health: async (): Promise<{ status: string }> => {
+    const response = await apiClient.get<{ status: string }>('/health')
     return response.data
   },
 
@@ -151,59 +64,36 @@ export const api = {
 
   // Delete a graph (knowledge base)
   deleteGraph: async (graphName: string): Promise<DeleteResponse> => {
-    const response = await apiClient.delete<DeleteResponse>(
-      `/graph/${encodeURIComponent(graphName)}`
-    )
+    const response = await apiClient.delete<DeleteResponse>(`/graph/${graphName}`)
     return response.data
   },
+}
 
-  // Documents CRUD
-  getDocuments: async (
-    graphName?: string,
-    query?: string,
-    topK: number = 10
-  ): Promise<ListDocumentsResponse> => {
-    const response = await apiClient.get<ListDocumentsResponse>('/documents', {
-      params: { graph_name: graphName, query, top_k: topK },
-    })
-    return response.data
-  },
+// Import types
+export interface ImportRequest {
+  sources: string[]
+  chunk_documents: boolean
+  chunk_size: number
+  chunk_overlap: number
+  extract_triplets: boolean
+  graph_name?: string
+}
 
-  getDocument: async (documentId: string, graphName?: string): Promise<DocumentResponse> => {
-    const response = await apiClient.get<DocumentResponse>(`/documents/${documentId}`, {
-      params: { graph_name: graphName },
-    })
-    return response.data
-  },
+export interface ImportResponse {
+  success: boolean
+  num_sources: number
+  num_documents: number
+  num_chunks: number
+  num_entities: number
+  num_relations: number
+  errors: string[]
+}
 
-  updateDocument: async (
-    documentId: string,
-    request: UpdateDocumentRequest,
-    graphName?: string
-  ): Promise<DocumentResponse> => {
-    const response = await apiClient.put<DocumentResponse>(`/documents/${documentId}`, request, {
-      params: { graph_name: graphName },
-    })
-    return response.data
-  },
-
-  deleteDocument: async (documentId: string, graphName?: string): Promise<DeleteResponse> => {
-    const response = await apiClient.delete<DeleteResponse>(`/documents/${documentId}`, {
-      params: { graph_name: graphName },
-    })
-    return response.data
-  },
-
-  // Ingestion
-  addDocuments: async (
-    request: AddDocumentsRequest,
-    graphName?: string
-  ): Promise<AddDocumentsResponse> => {
-    const response = await apiClient.post<AddDocumentsResponse>('/add_documents', request, {
-      params: { graph_name: graphName },
-    })
-    return response.data
-  },
+export interface UploadOptions {
+  chunkDocuments?: boolean
+  chunkSize?: number
+  extractTriplets?: boolean
+  graphName?: string
 }
 
 // Import documents from URLs or file paths
@@ -225,9 +115,6 @@ export async function uploadFiles(
   }
   if (options.chunkSize !== undefined) {
     formData.append('chunk_size', String(options.chunkSize))
-  }
-  if (options.chunkOverlap !== undefined) {
-    formData.append('chunk_overlap', String(options.chunkOverlap))
   }
   if (options.extractTriplets !== undefined) {
     formData.append('extract_triplets', String(options.extractTriplets))

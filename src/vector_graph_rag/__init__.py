@@ -5,7 +5,7 @@ This package provides a simple yet powerful approach to implement Graph RAG
 using only vector similarity search, without requiring a separate graph database.
 """
 
-from vector_graph_rag.config import Settings
+from vector_graph_rag.config import ModelConfig, Settings
 from vector_graph_rag.graph.builder import GraphBuilder
 from vector_graph_rag.graph.graph import Graph
 from vector_graph_rag.graph.knowledge_graph import SubGraph
@@ -14,14 +14,16 @@ from vector_graph_rag.llm.cache import LLMCache, get_llm_cache
 from vector_graph_rag.llm.extractor import TripletExtractor
 from vector_graph_rag.llm.reranker import LLMReranker
 from vector_graph_rag.models import Document, Entity, Passage, Relation, Triplet
+from vector_graph_rag.observability import observability_context, start_span
 from vector_graph_rag.rag import VectorGraphRAG, create_rag
 from vector_graph_rag.storage.embeddings import EmbeddingModel
 from vector_graph_rag.storage.milvus import MilvusStore
 
-__version__ = "0.1.3"
+__version__ = "0.4.1"
 
 __all__ = [
     "Settings",
+    "ModelConfig",
     "Document",
     "Triplet",
     "Entity",
@@ -39,4 +41,6 @@ __all__ = [
     "create_rag",
     "LLMCache",
     "get_llm_cache",
+    "observability_context",
+    "start_span",
 ]

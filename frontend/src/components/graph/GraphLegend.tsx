@@ -11,28 +11,28 @@ interface LegendItem {
 
 const legendItems: LegendItem[] = [
   {
-    label: '种子节点',
+    label: 'Seed',
     color: 'bg-amber-500',
     borderColor: 'border-amber-500',
-    description: '向量检索返回的初始结果',
+    description: 'Initial results from vector search',
   },
   {
-    label: '扩展节点',
+    label: 'Expanded',
     color: 'bg-blue-500',
     borderColor: 'border-blue-400',
-    description: '通过图遍历发现的关联节点',
+    description: 'Discovered through graph traversal',
   },
   {
-    label: '已选中',
+    label: 'Selected',
     color: 'bg-emerald-500',
     borderColor: 'border-emerald-500',
-    description: '大模型重排后选出的最相关结果',
+    description: 'Chosen by LLM as most relevant',
   },
   {
-    label: '已过滤',
+    label: 'Filtered',
     color: 'bg-slate-400',
     borderColor: 'border-slate-300 border-dashed',
-    description: '曾被考虑但最终未被选中的节点',
+    description: 'Considered but not selected',
   },
 ]
 
@@ -68,7 +68,7 @@ function GraphLegend() {
       <button
         onClick={() => setShowHelp(!showHelp)}
         className="ml-1 p-1 text-slate-400 hover:text-slate-600 transition-colors"
-        title="算法是如何工作的"
+        title="How the algorithm works"
       >
         <HelpCircle className="w-4 h-4" />
       </button>
@@ -76,14 +76,14 @@ function GraphLegend() {
       {/* Help popup */}
       {showHelp && (
         <div className="absolute bottom-full right-0 mb-2 p-3 bg-white rounded-lg border border-slate-200 shadow-lg w-72 text-xs z-50">
-          <h4 className="font-semibold text-slate-800 mb-2">Vector Graph RAG 工作原理</h4>
+          <h4 className="font-semibold text-slate-800 mb-2">How Vector Graph RAG Works</h4>
           <ol className="space-y-1.5 text-slate-600">
-            <li><span className="text-amber-600 font-medium">1. 种子:</span> 向量检索找到初始实体和关系</li>
-            <li><span className="text-blue-600 font-medium">2. 扩展:</span> 图遍历发现相连的节点</li>
-            <li><span className="text-slate-500 font-medium">3. 过滤:</span> 节点过多？按相似度保留最相关部分</li>
-            <li><span className="text-emerald-600 font-medium">4. 重排:</span> 大模型选出用于回答的最佳关系</li>
+            <li><span className="text-amber-600 font-medium">1. Seeds:</span> Vector search finds initial entities & relations</li>
+            <li><span className="text-blue-600 font-medium">2. Expand:</span> Graph traversal discovers connected nodes</li>
+            <li><span className="text-slate-500 font-medium">3. Filter:</span> Too many? Keep most relevant by similarity</li>
+            <li><span className="text-emerald-600 font-medium">4. Rerank:</span> LLM selects best relations for answering</li>
           </ol>
-          <p className="mt-2 text-slate-500 text-[10px]">点击左侧时间线步骤查看各个阶段</p>
+          <p className="mt-2 text-slate-500 text-[10px]">Click timeline steps to see each stage</p>
         </div>
       )}
     </div>

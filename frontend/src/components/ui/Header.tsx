@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Database, Settings, Github, ChevronDown, Check, Plus } from 'lucide-react'
 import { cn } from '@/utils/cn'
 import { useGraphs, queryKeys } from '@/api/queries'
@@ -7,7 +7,6 @@ import { ImportDialog } from '@/components/import/ImportDialog'
 import { SettingsDialog } from '@/components/settings/SettingsDialog'
 import { Button } from '@/components/ui/button'
 import { useQueryClient } from '@tanstack/react-query'
-import { graphDisplayName } from '@/utils/graphDisplayName'
 
 function Header() {
   const [isOpen, setIsOpen] = useState(false)
@@ -19,9 +18,8 @@ function Header() {
   const { data: graphsData, isLoading } = useGraphs()
   const { currentDataset, setCurrentDataset } = useDatasetStore()
 
-  const availableGraphs = useMemo(() => {
-    return graphsData?.graphs.filter((g) => g.has_all_collections) || []
-  }, [graphsData])
+  // Get available graphs that have all collections
+  const availableGraphs = graphsData?.graphs.filter((g) => g.has_all_collections) || []
 
   // Auto-select first dataset if none selected
   useEffect(() => {
@@ -29,16 +27,6 @@ function Header() {
       setCurrentDataset(availableGraphs[0].name)
     }
   }, [currentDataset, availableGraphs, setCurrentDataset])
-
-  // Reset stale persisted name (e.g. old "default" for unprefixed) when it no longer exists
-  useEffect(() => {
-    if (!graphsData?.graphs.length || !currentDataset) return
-    const names = graphsData.graphs.map((g) => g.name)
-    if (!names.includes(currentDataset)) {
-      const first = graphsData.graphs.find((g) => g.has_all_collections)?.name
-      if (first) setCurrentDataset(first)
-    }
-  }, [graphsData, currentDataset, setCurrentDataset])
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -52,6 +40,8 @@ function Header() {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
+  const displayName = currentDataset || 'Select dataset...'
+
   return (
     <header className="h-14 border-b border-slate-200 bg-white px-4 flex items-center justify-between">
       {/* Left section - Logo and title */}
@@ -63,13 +53,13 @@ function Header() {
           <h1 className="text-sm font-semibold text-slate-800">
             Vector Graph RAG
           </h1>
-          <p className="text-xs text-slate-500">知识图谱探索器</p>
+          <p className="text-xs text-slate-500">Knowledge Graph Explorer</p>
         </div>
       </div>
 
       {/* Center section - Graph selector */}
       <div className="flex items-center gap-2" ref={dropdownRef}>
-        <span className="text-xs text-slate-500">知识库:</span>
+        <span className="text-xs text-slate-500">Dataset:</span>
         <div className="relative">
           <button
             onClick={() => setIsOpen(!isOpen)}
@@ -83,11 +73,7 @@ function Header() {
             )}
           >
             <span className="font-medium text-slate-700 truncate">
-              {isLoading
-                ? '加载中...'
-                : currentDataset
-                  ? graphDisplayName(currentDataset)
-                  : '选择知识库...'}
+              {isLoading ? 'Loading...' : displayName}
             </span>
             <ChevronDown
               className={cn(
@@ -122,7 +108,7 @@ function Header() {
                         : 'text-slate-700'
                     )}
                   >
-                    {graphDisplayName(graph.name)}
+                    {graph.name}
                   </span>
                   {currentDataset === graph.name && (
                     <Check className="w-4 h-4 text-blue-600 flex-shrink-0" />
@@ -136,7 +122,7 @@ function Header() {
           {isOpen && availableGraphs.length === 0 && !isLoading && (
             <div className="absolute top-full left-0 mt-1 w-full min-w-[220px] bg-white border border-slate-200 rounded-md shadow-lg z-50 py-3 px-3">
               <p className="text-sm text-slate-500 text-center">
-                暂无可用知识库
+                No datasets available
               </p>
             </div>
           )}
@@ -152,7 +138,7 @@ function Header() {
           className="gap-1"
         >
           <Plus className="w-4 h-4" />
-          导入
+          Import
         </Button>
         <a
           href="https://github.com/zilliztech/vector-graph-rag"
@@ -166,7 +152,7 @@ function Header() {
         <button
           onClick={() => setSettingsDialogOpen(true)}
           className="p-2 rounded-md text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors"
-          title="设置"
+          title="Settings"
         >
           <Settings className="w-5 h-5" />
         </button>

@@ -4,7 +4,9 @@
 
 # Vector Graph RAG
 
-**Graph RAG with pure vector search** — no graph database needed, single-pass LLM reranking, optimized for knowledge-intensive domains.
+**Graph RAG with pure vector search** — no graph database needed, configurable model reranking, optimized for knowledge-intensive domains.
+
+Use the default model or enable the [two-stage Jev reranker](guides/reranking.md). The [evaluation](evaluation.md#jev-reranker-evaluation) includes the Luna/Flash comparison and measured model-call timings.
 
 ## Why Vector Graph RAG?
 
@@ -45,8 +47,8 @@ Pure vector search with Milvus — no Neo4j, no ArangoDB, no extra infrastructur
 </div>
 <div class="feature-card" markdown>
 
-### :material-lightning-bolt: Single-Pass Reranking
-One LLM reranking call, no iterative agent loops. 2 LLM calls total per query vs 5+ for iterative approaches.
+### :material-lightning-bolt: Configurable Reranking
+Choose single-pass generative reranking or two-stage Jev scoring, without an iterative search loop.
 
 </div>
 <div class="feature-card" markdown>
@@ -64,7 +66,7 @@ Milvus Lite by default — works as a local file, no server setup needed. Just `
 <div class="feature-card" markdown>
 
 ### :material-chart-bar: State-of-the-Art
-87.8% average Recall@5 on standard multi-hop QA benchmarks, competitive with HippoRAG 2.
+Two-stage Jev leads the compared baselines on MuSiQue and 2Wiki and reaches the quality–latency Pareto frontier. See the [latest results](evaluation.md#jev-reranker-evaluation).
 
 </div>
 <div class="feature-card" markdown>
@@ -104,7 +106,7 @@ from vector_graph_rag import VectorGraphRAG
 
 rag = VectorGraphRAG()  # reads OPENAI_API_KEY from environment
 
-rag.add_texts([
+rag.rebuild_texts([
     "Albert Einstein developed the theory of relativity.",
     "The theory of relativity revolutionized our understanding of space and time.",
 ])
@@ -112,6 +114,9 @@ rag.add_texts([
 result = rag.query("What did Einstein develop?")
 print(result.answer)
 ```
+
+!!! note "Ingestion semantics"
+    The legacy `add_*` ingestion helpers rebuild the full knowledge base and are planned for removal in v1.0.0. Use `rebuild_texts()`, `rebuild_documents()`, or `rebuild_documents_with_triplets()` for full refreshes, and use `upsert_documents_by_source()` / `delete_documents_by_source()` when a source file, page, or message changes later. See [Incremental Updates](guides/incremental-updates.md) for parser integration, source key design, and retry recommendations.
 
 !!! tip "Getting Started"
     See the [Getting Started](getting-started.md) guide for installation and configuration options.
@@ -125,5 +130,18 @@ print(result.answer)
 | HippoRAG 2 | **74.7%** | **96.3%** | 90.4% | 87.1% |
 | **Vector Graph RAG** | 73.0% | **96.3%** | **94.1%** | **87.8%** |
 
-!!! note "Benchmark Details"
-    Recall@5 on standard multi-hop QA benchmarks. Uses the same pre-extracted triplets as HippoRAG for fair comparison. See [Evaluation](evaluation.md) for full details.
+Historical results from before the September 2026 Jev integration.[^hotpot-sampling]
+
+These benchmarks use Recall@5 and HippoRAG’s pre-extracted triplets. See [Evaluation](evaluation.md) for details and the latest Jev results.
+
+## Two-stage Jev reaches the quality–latency Pareto frontier
+
+**Jev 1.14 achieves 86.61% average Recall@5** on MuSiQue and 2Wiki (1,000 questions each), the highest among the compared methods. Its estimated direct API mean is **approximately 4.9 seconds**. The same-query improvement over Jev 1.13 is **0.55 percentage points**, reproduced on the additional 1,800 queries beyond the pilot.
+
+With the displayed timings, this puts two-stage Jev on the **quality–latency Pareto frontier**. Jev 1.14 uses a calibrated direct API estimate; the other Jev, Luna and Flash points use measured API means, and HippoRAG 2 retains a reference estimate. Measurements exclude the rest of the search pipeline and differ in test conditions. This two-dataset evaluation is separate from the historical three-dataset results.
+
+![Quality and latency](assets/evaluation/quality-latency.png)
+
+See [evaluation details](evaluation.md#jev-reranker-evaluation) and [configuration](guides/reranking.md).
+
+[^hotpot-sampling]: The HippoRAG authors resampled HotpotQA between HippoRAG and HippoRAG 2, so the historical HotpotQA results use different question samples. The original three-dataset results are retained for reference. This does not affect the new Jev comparison, which uses MuSiQue and 2Wiki only.

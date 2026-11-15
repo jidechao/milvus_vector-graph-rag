@@ -100,13 +100,13 @@ class GraphBuilder:
         subject = processing_phrases(triplet.subject)
         predicate = processing_phrases(triplet.predicate)
         obj = processing_phrases(triplet.object)
-
-        # Skip malformed triplets that normalize to empty parts.
-        # Otherwise they become blank relation text and produce zero embeddings downstream.
-        if not subject or not predicate or not obj:
-            return ""
-
         relation_text = f"{subject} {predicate} {obj}"
+
+        # Link both entities to this passage before the relation dedup check:
+        # when a later passage reuses the same relation text, its entity links
+        # must still be recorded (entity.passage_ids / passage.entity_ids).
+        subject_id = self._add_entity(triplet.subject, passage_id)
+        object_id = self._add_entity(triplet.object, passage_id)
 
         if relation_text not in self.relation_text_to_id:
             relation_id = generate_id()
@@ -116,10 +116,6 @@ class GraphBuilder:
 
             # Store the original triplet (to avoid re-parsing from text)
             self.relation_id_to_triplet[relation_id] = triplet
-
-            # Link entities to this relation (also links entity to passage)
-            subject_id = self._add_entity(triplet.subject, passage_id)
-            object_id = self._add_entity(triplet.object, passage_id)
 
             self.entity_to_relation_ids[subject_id].append(relation_id)
             self.entity_to_relation_ids[object_id].append(relation_id)

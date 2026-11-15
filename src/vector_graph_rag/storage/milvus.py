@@ -11,16 +11,20 @@ Users should interact with passages through the Graph abstraction layer.
 """
 
 import logging
+import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from pymilvus import DataType, MilvusClient
 from tqdm import tqdm
 
 from vector_graph_rag.config import Settings, get_settings
+from vector_graph_rag.observability import start_span
 from vector_graph_rag.storage.embeddings import EmbeddingModel
 
 logger = logging.getLogger(__name__)
+
+_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def generate_id() -> str:
@@ -73,6 +77,117 @@ class MilvusStore:
         self.relation_collection = f"{prefix}{self.settings.relation_collection}"
         self.passage_collection = f"{prefix}{self.settings.passage_collection}"
 
+    @staticmethod
+    def _combine_filters(*filters: Optional[str]) -> str:
+        """Combine non-empty Milvus filter expressions with AND."""
+        parts = [f.strip() for f in filters if f and f.strip()]
+        return " and ".join(f"({part})" for part in parts)
+
+    @staticmethod
+    def _quote_string(value: str) -> str:
+        """Quote a string value for Milvus filter expressions."""
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    @staticmethod
+    def _validate_field_name(field_name: str) -> str:
+        """Validate a metadata field name for safe filter construction."""
+        if not isinstance(field_name, str) or not _FIELD_NAME_RE.fullmatch(field_name):
+            raise ValueError(
+                "source_field must be a simple metadata field name containing only "
+                "letters, numbers, and underscores, and it must not start with a number."
+            )
+        return field_name
+
+    def _batch_items(
+        self,
+        items: List[Any],
+        batch_size: Optional[int] = None,
+    ) -> Iterator[List[Any]]:
+        """Yield items in batches using the configured batch size."""
+        effective_batch_size = batch_size or self.settings.batch_size
+        for start_idx in range(0, len(items), effective_batch_size):
+            yield items[start_idx : start_idx + effective_batch_size]
+
+    @staticmethod
+    def _unique_preserve_order(values: List[str]) -> List[str]:
+        """Return unique strings without changing first-seen order."""
+        seen = set()
+        unique_values = []
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            unique_values.append(value)
+        return unique_values
+
+    def _query_by_texts(
+        self,
+        collection_name: str,
+        texts: List[str],
+        output_fields: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Query records by exact text in batches."""
+        records_by_text: Dict[str, Dict[str, Any]] = {}
+        unique_texts = self._unique_preserve_order(texts)
+        if not unique_texts:
+            return records_by_text
+
+        with start_span(
+            "vgrag.milvus.query_by_texts",
+            {
+                "db.system": "milvus",
+                "db.collection.name": collection_name,
+                "vgrag.record_count": len(texts),
+                "vgrag.unique_record_count": len(unique_texts),
+                "vgrag.batch_size": self.settings.batch_size,
+            },
+        ):
+            for batch_texts in self._batch_items(unique_texts):
+                quoted_texts = ", ".join(self._quote_string(text) for text in batch_texts)
+                results = self.client.query(
+                    collection_name=collection_name,
+                    filter=f"text in [{quoted_texts}]",
+                    output_fields=output_fields,
+                )
+                for record in results:
+                    text = record.get("text")
+                    if isinstance(text, str) and text not in records_by_text:
+                        records_by_text[text] = record
+
+        return records_by_text
+
+    def _upsert_records(
+        self,
+        collection_name: str,
+        records: List[Dict[str, Any]],
+    ) -> None:
+        """Upsert records in batches using the configured batch size."""
+        if not records:
+            return
+
+        with start_span(
+            "vgrag.milvus.upsert",
+            {
+                "db.system": "milvus",
+                "db.collection.name": collection_name,
+                "vgrag.record_count": len(records),
+                "vgrag.batch_size": self.settings.batch_size,
+            },
+        ):
+            for batch_records in self._batch_items(records):
+                self.client.upsert(
+                    collection_name=collection_name,
+                    data=batch_records,
+                )
+
+    def _upsert_entity_records(self, records: List[Dict[str, Any]]) -> None:
+        """Upsert fully materialized entity records."""
+        self._upsert_records(self.entity_collection, records)
+
+    def _upsert_relation_records(self, records: List[Dict[str, Any]]) -> None:
+        """Upsert fully materialized relation records."""
+        self._upsert_records(self.relation_collection, records)
+
     def _create_collection(
         self,
         collection_name: str,
@@ -87,23 +202,7 @@ class MilvusStore:
             else:
                 return
 
-        # Dimension priority:
-        # 1) Explicit create_collections(dimension=...)
-        # 2) Configured VGRAG_EMBEDDING_DIMENSION
-        requested_dim = dimension or self.settings.embedding_dimension
-        detected_dim = self.embedding_model.dimension
-
-        # Always align collection schema with actual embedding output dimension.
-        # Otherwise inserts fail later with cryptic Milvus "length should divide dim" errors.
-        if requested_dim and requested_dim != detected_dim:
-            logger.warning(
-                "Embedding dimension mismatch detected: requested=%s, model_output=%s. "
-                "Using model_output dimension to create collection '%s'.",
-                requested_dim,
-                detected_dim,
-                collection_name,
-            )
-        dim = detected_dim
+        dim = dimension or self.embedding_model.dimension
         index_type = self.settings.milvus_index_type
         index_params_config = self.settings.milvus_index_params
 
@@ -125,13 +224,23 @@ class MilvusStore:
             add_index_kwargs["params"] = index_params_config
         index_params.add_index(**add_index_kwargs)
 
-        self.client.create_collection(
-            collection_name=collection_name,
-            schema=schema,
-            index_params=index_params,
-            # consistency_level="Strong",  # Strong waits for all loads to complete
-            consistency_level=self.settings.milvus_consistency_level,
-        )
+        with start_span(
+            "vgrag.milvus.create_collection",
+            {
+                "db.system": "milvus",
+                "db.collection.name": collection_name,
+                "vgrag.embedding_dimension": dim,
+                "vgrag.milvus_index_type": index_type,
+                "vgrag.milvus_consistency_level": self.settings.milvus_consistency_level,
+            },
+        ):
+            self.client.create_collection(
+                collection_name=collection_name,
+                schema=schema,
+                index_params=index_params,
+                # consistency_level="Strong",  # Strong waits for all loads to complete
+                consistency_level=self.settings.milvus_consistency_level,
+            )
 
     def create_collections(
         self,
@@ -158,13 +267,20 @@ class MilvusStore:
 
     def drop_collections(self) -> None:
         """Drop all collections."""
-        for collection_name in [
-            self.entity_collection,
-            self.relation_collection,
-            self.passage_collection,
-        ]:
-            if self.client.has_collection(collection_name):
-                self.client.drop_collection(collection_name)
+        with start_span(
+            "vgrag.milvus.drop_collections",
+            {
+                "db.system": "milvus",
+                "vgrag.collection_count": 3,
+            },
+        ):
+            for collection_name in [
+                self.entity_collection,
+                self.relation_collection,
+                self.passage_collection,
+            ]:
+                if self.client.has_collection(collection_name):
+                    self.client.drop_collection(collection_name)
 
     def _insert_data(
         self,
@@ -189,43 +305,40 @@ class MilvusStore:
         """
         batch_size = batch_size or self.settings.batch_size
 
-        # Validate embedding shapes early for clearer errors.
-        if embeddings:
-            expected_dim = len(embeddings[0])
-            invalid_idx = next(
-                (i for i, emb in enumerate(embeddings) if len(emb) != expected_dim),
-                None,
-            )
-            if invalid_idx is not None:
-                raise ValueError(
-                    f"Inconsistent embedding dimensions in batch: index 0 has dim {expected_dim}, "
-                    f"but index {invalid_idx} has dim {len(embeddings[invalid_idx])}."
-                )
-
         total_batches = (len(ids) + batch_size - 1) // batch_size
         iterator = range(0, len(ids), batch_size)
 
         if show_progress:
             iterator = tqdm(iterator, total=total_batches, desc=f"Inserting to {collection_name}")
 
-        for start_idx in iterator:
-            end_idx = min(start_idx + batch_size, len(ids))
-            batch_data = [
-                {
-                    "id": ids[i],
-                    "text": texts[i],
-                    "vector": embeddings[i],
-                }
-                for i in range(start_idx, end_idx)
-            ]
-            # Add metadata if provided
-            if metadatas:
-                for i, data in enumerate(batch_data):
-                    idx = start_idx + i
-                    if idx < len(metadatas):
-                        data.update(metadatas[idx])
+        with start_span(
+            "vgrag.milvus.insert",
+            {
+                "db.system": "milvus",
+                "db.collection.name": collection_name,
+                "vgrag.record_count": len(ids),
+                "vgrag.batch_size": batch_size,
+                "vgrag.batch_count": total_batches,
+            },
+        ):
+            for start_idx in iterator:
+                end_idx = min(start_idx + batch_size, len(ids))
+                batch_data = [
+                    {
+                        "id": ids[i],
+                        "text": texts[i],
+                        "vector": embeddings[i],
+                    }
+                    for i in range(start_idx, end_idx)
+                ]
+                # Add metadata if provided
+                if metadatas:
+                    for i, data in enumerate(batch_data):
+                        idx = start_idx + i
+                        if idx < len(metadatas):
+                            data.update(metadatas[idx])
 
-            self.client.insert(collection_name=collection_name, data=batch_data)
+                self.client.insert(collection_name=collection_name, data=batch_data)
 
     def _insert_entities(
         self,
@@ -390,12 +503,22 @@ class MilvusStore:
         """
         top_k = top_k or self.settings.entity_top_k
 
-        results = self.client.search(
-            collection_name=self.entity_collection,
-            data=query_embeddings,
-            limit=top_k,
-            output_fields=["id", "text", "relation_ids", "passage_ids"],
-        )
+        with start_span(
+            "vgrag.milvus.search",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.entity_collection,
+                "vgrag.query_vector_count": len(query_embeddings),
+                "vgrag.top_k": top_k,
+                "vgrag.record_type": "entity",
+            },
+        ):
+            results = self.client.search(
+                collection_name=self.entity_collection,
+                data=query_embeddings,
+                limit=top_k,
+                output_fields=["id", "text", "relation_ids", "passage_ids"],
+            )
         return results
 
     def _search_relations(
@@ -419,26 +542,37 @@ class MilvusStore:
         """
         top_k = top_k or self.settings.relation_top_k
 
-        results = self.client.search(
-            collection_name=self.relation_collection,
-            data=[query_embedding],
-            limit=top_k,
-            output_fields=[
-                "id",
-                "text",
-                "entity_ids",
-                "passage_ids",
-                "subject",
-                "predicate",
-                "object",
-            ],
-        )
+        with start_span(
+            "vgrag.milvus.search",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.relation_collection,
+                "vgrag.query_vector_count": 1,
+                "vgrag.top_k": top_k,
+                "vgrag.record_type": "relation",
+            },
+        ):
+            results = self.client.search(
+                collection_name=self.relation_collection,
+                data=[query_embedding],
+                limit=top_k,
+                output_fields=[
+                    "id",
+                    "text",
+                    "entity_ids",
+                    "passage_ids",
+                    "subject",
+                    "predicate",
+                    "object",
+                ],
+            )
         return results[0] if results else []
 
     def search_passages(
         self,
         query_embedding: List[float],
         top_k: Optional[int] = None,
+        filter: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for similar passages (naive RAG).
@@ -446,18 +580,31 @@ class MilvusStore:
         Args:
             query_embedding: Query embedding vector.
             top_k: Number of results to return.
+            filter: Optional Milvus filter expression for passage metadata.
 
         Returns:
             List of search results with id (str) and text.
         """
         top_k = top_k or self.settings.final_top_k
 
-        results = self.client.search(
-            collection_name=self.passage_collection,
-            data=[query_embedding],
-            limit=top_k,
-            output_fields=["id", "text", "entity_ids", "relation_ids"],
-        )
+        with start_span(
+            "vgrag.milvus.search",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.passage_collection,
+                "vgrag.query_vector_count": 1,
+                "vgrag.top_k": top_k,
+                "vgrag.record_type": "passage",
+                "vgrag.has_filter": bool(filter),
+            },
+        ):
+            results = self.client.search(
+                collection_name=self.passage_collection,
+                data=[query_embedding],
+                limit=top_k,
+                filter=filter,
+                output_fields=["id", "text", "entity_ids", "relation_ids"],
+            )
         return results[0] if results else []
 
     def _get_entities_by_ids(
@@ -480,12 +627,42 @@ class MilvusStore:
 
         # Format IDs as quoted strings for Milvus filter
         ids_str = ", ".join(f'"{eid}"' for eid in entity_ids)
-        results = self.client.query(
-            collection_name=self.entity_collection,
-            filter=f"id in [{ids_str}]",
+        with start_span(
+            "vgrag.milvus.query",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.entity_collection,
+                "vgrag.record_type": "entity",
+                "vgrag.id_count": len(entity_ids),
+            },
+        ):
+            results = self.client.query(
+                collection_name=self.entity_collection,
+                filter=f"id in [{ids_str}]",
+                output_fields=["id", "text", "relation_ids", "passage_ids"],
+            )
+        return results
+
+    def _get_entities_by_texts(
+        self,
+        entity_texts: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Get entities by exact text.
+
+        This is a private helper for incremental graph updates.
+
+        Args:
+            entity_texts: Entity texts to look up.
+
+        Returns:
+            Mapping from entity text to the first matching entity record.
+        """
+        return self._query_by_texts(
+            self.entity_collection,
+            entity_texts,
             output_fields=["id", "text", "relation_ids", "passage_ids"],
         )
-        return results
 
     def _get_relations_by_ids(
         self,
@@ -508,9 +685,48 @@ class MilvusStore:
 
         # Format IDs as quoted strings for Milvus filter
         ids_str = ", ".join(f'"{rid}"' for rid in relation_ids)
-        results = self.client.query(
-            collection_name=self.relation_collection,
-            filter=f"id in [{ids_str}]",
+        with start_span(
+            "vgrag.milvus.query",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.relation_collection,
+                "vgrag.record_type": "relation",
+                "vgrag.id_count": len(relation_ids),
+            },
+        ):
+            results = self.client.query(
+                collection_name=self.relation_collection,
+                filter=f"id in [{ids_str}]",
+                output_fields=[
+                    "id",
+                    "text",
+                    "entity_ids",
+                    "passage_ids",
+                    "subject",
+                    "predicate",
+                    "object",
+                ],
+            )
+        return results
+
+    def _get_relations_by_texts(
+        self,
+        relation_texts: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Get relations by exact text.
+
+        This is a private helper for incremental graph updates.
+
+        Args:
+            relation_texts: Relation texts to look up.
+
+        Returns:
+            Mapping from relation text to the first matching relation record.
+        """
+        return self._query_by_texts(
+            self.relation_collection,
+            relation_texts,
             output_fields=[
                 "id",
                 "text",
@@ -521,17 +737,20 @@ class MilvusStore:
                 "object",
             ],
         )
-        return results
 
     def get_passages_by_ids(
         self,
         passage_ids: List[str],
+        filter: Optional[str] = None,
+        output_fields: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get passages by their IDs.
 
         Args:
             passage_ids: List of passage IDs (strings).
+            filter: Optional Milvus filter expression for passage metadata.
+            output_fields: Optional output fields. Defaults to graph adjacency fields.
 
         Returns:
             List of passage data with id, text, entity_ids, and relation_ids.
@@ -541,12 +760,113 @@ class MilvusStore:
 
         # Format IDs as quoted strings for Milvus filter
         ids_str = ", ".join(f'"{pid}"' for pid in passage_ids)
-        results = self.client.query(
-            collection_name=self.passage_collection,
-            filter=f"id in [{ids_str}]",
-            output_fields=["id", "text", "entity_ids", "relation_ids"],
-        )
-        return results
+        filter_expr = self._combine_filters(f"id in [{ids_str}]", filter)
+        with start_span(
+            "vgrag.milvus.query",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.passage_collection,
+                "vgrag.record_type": "passage",
+                "vgrag.id_count": len(passage_ids),
+                "vgrag.has_filter": bool(filter),
+            },
+        ):
+            results = self.client.query(
+                collection_name=self.passage_collection,
+                filter=filter_expr,
+                output_fields=output_fields or ["id", "text", "entity_ids", "relation_ids"],
+            )
+        return list(results)
+
+    def get_passages_by_document_id(self, document_id: str) -> List[Dict[str, Any]]:
+        """
+        Get passages that belong to a legacy document_id metadata value.
+
+        This is retained for compatibility with data written by older
+        incremental APIs. New source-level updates use get_passages_by_source().
+
+        Args:
+            document_id: Legacy source document ID.
+
+        Returns:
+            Matching passage records with graph adjacency metadata.
+        """
+        with start_span(
+            "vgrag.milvus.query",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.passage_collection,
+                "vgrag.record_type": "passage",
+                "vgrag.lookup_field": "document_id",
+            },
+        ):
+            results = self.client.query(
+                collection_name=self.passage_collection,
+                filter=f"document_id == {self._quote_string(document_id)}",
+                output_fields=["id", "text", "entity_ids", "relation_ids", "document_id"],
+            )
+        return list(results)
+
+    def get_passages_by_source(
+        self,
+        source: str,
+        source_field: str = "source",
+    ) -> List[Dict[str, Any]]:
+        """
+        Get passages that belong to a source metadata value.
+
+        Args:
+            source: Stable source value stored in passage metadata.
+            source_field: Metadata field used to group chunks by source.
+
+        Returns:
+            Matching passage records with graph adjacency metadata.
+        """
+        source_field = self._validate_field_name(source_field)
+        with start_span(
+            "vgrag.milvus.query",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.passage_collection,
+                "vgrag.record_type": "passage",
+                "vgrag.lookup_field": source_field,
+            },
+        ):
+            results = self.client.query(
+                collection_name=self.passage_collection,
+                filter=f"{source_field} == {self._quote_string(source)}",
+                output_fields=["id", "text", "entity_ids", "relation_ids", source_field],
+            )
+        return list(results)
+
+    def query_passage_ids(self, filter: str) -> List[str]:
+        """
+        Query passage IDs that match a Milvus filter expression.
+
+        Args:
+            filter: Milvus filter expression for passage metadata.
+
+        Returns:
+            Matching passage IDs.
+        """
+        if not filter or not filter.strip():
+            return []
+
+        with start_span(
+            "vgrag.milvus.query",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.passage_collection,
+                "vgrag.record_type": "passage",
+                "vgrag.has_filter": True,
+            },
+        ):
+            results = self.client.query(
+                collection_name=self.passage_collection,
+                filter=filter,
+                output_fields=["id"],
+            )
+        return [r["id"] for r in results]
 
     # ==================== Update Operations ====================
 
@@ -609,10 +929,19 @@ class MilvusStore:
             update_data["passage_ids"] = entity_data["passage_ids"]
 
         # Upsert the entity
-        self.client.upsert(
-            collection_name=self.entity_collection,
-            data=[update_data],
-        )
+        with start_span(
+            "vgrag.milvus.upsert",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.entity_collection,
+                "vgrag.record_type": "entity",
+                "vgrag.record_count": 1,
+            },
+        ):
+            self.client.upsert(
+                collection_name=self.entity_collection,
+                data=[update_data],
+            )
         return True
 
     def _update_relation(
@@ -690,10 +1019,19 @@ class MilvusStore:
         elif "object" in relation_data:
             update_data["object"] = relation_data["object"]
 
-        self.client.upsert(
-            collection_name=self.relation_collection,
-            data=[update_data],
-        )
+        with start_span(
+            "vgrag.milvus.upsert",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.relation_collection,
+                "vgrag.record_type": "relation",
+                "vgrag.record_count": 1,
+            },
+        ):
+            self.client.upsert(
+                collection_name=self.relation_collection,
+                data=[update_data],
+            )
         return True
 
     def update_passage(
@@ -748,10 +1086,19 @@ class MilvusStore:
         elif "relation_ids" in passage_data:
             update_data["relation_ids"] = passage_data["relation_ids"]
 
-        self.client.upsert(
-            collection_name=self.passage_collection,
-            data=[update_data],
-        )
+        with start_span(
+            "vgrag.milvus.upsert",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.passage_collection,
+                "vgrag.record_type": "passage",
+                "vgrag.record_count": 1,
+            },
+        ):
+            self.client.upsert(
+                collection_name=self.passage_collection,
+                data=[update_data],
+            )
         return True
 
     # ==================== Delete Operations ====================
@@ -772,10 +1119,19 @@ class MilvusStore:
         if not existing:
             return False
 
-        self.client.delete(
-            collection_name=self.entity_collection,
-            filter=f'id == "{entity_id}"',
-        )
+        with start_span(
+            "vgrag.milvus.delete",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.entity_collection,
+                "vgrag.record_type": "entity",
+                "vgrag.record_count": 1,
+            },
+        ):
+            self.client.delete(
+                collection_name=self.entity_collection,
+                filter=f'id == "{entity_id}"',
+            )
         return True
 
     def _delete_relation(self, relation_id: str) -> bool:
@@ -794,10 +1150,19 @@ class MilvusStore:
         if not existing:
             return False
 
-        self.client.delete(
-            collection_name=self.relation_collection,
-            filter=f'id == "{relation_id}"',
-        )
+        with start_span(
+            "vgrag.milvus.delete",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.relation_collection,
+                "vgrag.record_type": "relation",
+                "vgrag.record_count": 1,
+            },
+        ):
+            self.client.delete(
+                collection_name=self.relation_collection,
+                filter=f'id == "{relation_id}"',
+            )
         return True
 
     def delete_passage(self, passage_id: str) -> bool:
@@ -814,10 +1179,19 @@ class MilvusStore:
         if not existing:
             return False
 
-        self.client.delete(
-            collection_name=self.passage_collection,
-            filter=f'id == "{passage_id}"',
-        )
+        with start_span(
+            "vgrag.milvus.delete",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.passage_collection,
+                "vgrag.record_type": "passage",
+                "vgrag.record_count": 1,
+            },
+        ):
+            self.client.delete(
+                collection_name=self.passage_collection,
+                filter=f'id == "{passage_id}"',
+            )
         return True
 
     def _delete_entities(self, entity_ids: List[str]) -> int:
@@ -836,10 +1210,19 @@ class MilvusStore:
             return 0
 
         ids_str = ", ".join(f'"{eid}"' for eid in entity_ids)
-        self.client.delete(
-            collection_name=self.entity_collection,
-            filter=f"id in [{ids_str}]",
-        )
+        with start_span(
+            "vgrag.milvus.delete",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.entity_collection,
+                "vgrag.record_type": "entity",
+                "vgrag.record_count": len(entity_ids),
+            },
+        ):
+            self.client.delete(
+                collection_name=self.entity_collection,
+                filter=f"id in [{ids_str}]",
+            )
         return len(entity_ids)
 
     def _delete_relations(self, relation_ids: List[str]) -> int:
@@ -858,10 +1241,19 @@ class MilvusStore:
             return 0
 
         ids_str = ", ".join(f'"{rid}"' for rid in relation_ids)
-        self.client.delete(
-            collection_name=self.relation_collection,
-            filter=f"id in [{ids_str}]",
-        )
+        with start_span(
+            "vgrag.milvus.delete",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.relation_collection,
+                "vgrag.record_type": "relation",
+                "vgrag.record_count": len(relation_ids),
+            },
+        ):
+            self.client.delete(
+                collection_name=self.relation_collection,
+                filter=f"id in [{ids_str}]",
+            )
         return len(relation_ids)
 
     def delete_passages(self, passage_ids: List[str]) -> int:
@@ -878,10 +1270,19 @@ class MilvusStore:
             return 0
 
         ids_str = ", ".join(f'"{pid}"' for pid in passage_ids)
-        self.client.delete(
-            collection_name=self.passage_collection,
-            filter=f"id in [{ids_str}]",
-        )
+        with start_span(
+            "vgrag.milvus.delete",
+            {
+                "db.system": "milvus",
+                "db.collection.name": self.passage_collection,
+                "vgrag.record_type": "passage",
+                "vgrag.record_count": len(passage_ids),
+            },
+        ):
+            self.client.delete(
+                collection_name=self.passage_collection,
+                filter=f"id in [{ids_str}]",
+            )
         return len(passage_ids)
 
     # ==================== Utility Methods ====================
@@ -932,33 +1333,19 @@ class MilvusStore:
         client = MilvusClient(**client_kwargs)
 
         # List all collections
-        all_collections = client.list_collections()
+        with start_span(
+            "vgrag.milvus.list_collections",
+            {
+                "db.system": "milvus",
+            },
+        ):
+            all_collections = client.list_collections()
 
         # Find entity collections and extract prefixes
         graphs: List[Dict[str, Any]] = []
         entity_suffix_pattern = f"_{entity_suffix}"
 
         for collection in all_collections:
-            # Handle default graph without prefix:
-            # vgrag_entities / vgrag_relations / vgrag_passages
-            if collection == entity_suffix:
-                relation_col = relation_suffix
-                passage_col = passage_suffix
-                has_relations = relation_col in all_collections
-                has_passages = passage_col in all_collections
-
-                graphs.append(
-                    {
-                        # Distinct from prefix "default" (default_vgrag_*). API maps this to no prefix.
-                        "name": "unprefixed",
-                        "entity_collection": collection,
-                        "relation_collection": relation_col,
-                        "passage_collection": passage_col,
-                        "has_all_collections": has_relations and has_passages,
-                    }
-                )
-                continue
-
             if collection.endswith(entity_suffix_pattern):
                 # Extract prefix (graph name)
                 prefix = collection[: -len(entity_suffix_pattern)]
@@ -1020,111 +1407,40 @@ class MilvusStore:
 
         client = MilvusClient(**client_kwargs)
 
-        # API graph name "unprefixed" = bare vgrag_* (no collection_prefix)
-        if graph_name in ("unprefixed", "__unprefixed__"):
-            entity_col = entity_suffix
-            relation_col = relation_suffix
-            passage_col = passage_suffix
-        else:
-            entity_col = f"{graph_name}_{entity_suffix}"
-            relation_col = f"{graph_name}_{relation_suffix}"
-            passage_col = f"{graph_name}_{passage_suffix}"
+        # Collection names for this graph
+        entity_col = f"{graph_name}_{entity_suffix}"
+        relation_col = f"{graph_name}_{relation_suffix}"
+        passage_col = f"{graph_name}_{passage_suffix}"
 
         deleted = False
 
         # Delete each collection if it exists
-        for collection_name in [entity_col, relation_col, passage_col]:
-            try:
-                if client.has_collection(collection_name):
-                    client.drop_collection(collection_name)
-                    deleted = True
-            except Exception as e:
-                # Log error but continue with other collections
-                logger.error("Error deleting collection %s: %s", collection_name, e)
+        with start_span(
+            "vgrag.milvus.delete_graph",
+            {
+                "db.system": "milvus",
+                "vgrag.graph_name": graph_name,
+                "vgrag.collection_count": 3,
+            },
+        ):
+            for collection_name in [entity_col, relation_col, passage_col]:
+                try:
+                    if client.has_collection(collection_name):
+                        client.drop_collection(collection_name)
+                        deleted = True
+                except Exception as e:
+                    # Log error but continue with other collections
+                    logger.error("Error deleting collection %s: %s", collection_name, e)
 
         return deleted
 
-    @staticmethod
-    def _row_count_from_stats_dict(raw: Optional[Dict[str, Any]]) -> int:
-        """Parse row count from get_collection_stats() (key names vary by Milvus / Zilliz build)."""
-        if not raw:
-            return 0
-        lowered = {str(k).lower(): v for k, v in raw.items()}
-        for key in ("row_count", "num_entities", "entity_count"):
-            if key in lowered:
-                try:
-                    return int(lowered[key])
-                except (TypeError, ValueError):
-                    continue
-        return 0
-
-    def _count_star_query(self, collection_name: str, expr: str, consistency_level: str) -> Optional[int]:
-        """Run count(*) aggregation; returns None if query fails or yields no parseable count."""
-        try:
-            res = self.client.query(
-                collection_name=collection_name,
-                filter=expr,
-                output_fields=["count(*)"],
-                consistency_level=consistency_level,
-            )
-            if not res:
-                return None
-            row = res[0]
-            for k, v in row.items():
-                if "count" in str(k).lower():
-                    return int(v)
-        except Exception as e:
-            logger.debug(
-                "count(*) query failed for %s expr=%r consistency=%s: %s",
-                collection_name,
-                expr,
-                consistency_level,
-                e,
-            )
-        return None
-
-    def _accurate_row_count(self, collection_name: str) -> int:
-        """
-        Return row count for UI stats, aligned with query-visible rows when possible.
-
-        ``get_collection_stats`` / segment metadata often **under-counts** (e.g. growing
-        segments). Do **not** return early on a positive ``row_count``; prefer ``count(*)``
-        after ``load_collection``, trying ``Strong`` consistency first per Milvus guidance.
-        """
-        if not self.client.has_collection(collection_name):
-            return 0
-
-        stats_n = 0
-        try:
-            raw = self.client.get_collection_stats(collection_name)
-            stats_n = self._row_count_from_stats_dict(raw)
-        except Exception as e:
-            logger.debug("get_collection_stats failed for %s: %s", collection_name, e)
-
-        try:
-            self.client.load_collection(collection_name=collection_name, timeout=120)
-        except Exception as e:
-            logger.debug("load_collection for stats skipped/failed for %s: %s", collection_name, e)
-
-        configured = getattr(self.settings, "milvus_consistency_level", None) or "Bounded"
-        # Strong first: Milvus docs recommend it for authoritative count(*)
-        consistency_order = ["Strong", configured, "Bounded", "Eventually", "Session"]
-        consistency_levels: List[str] = []
-        for c in consistency_order:
-            if c not in consistency_levels:
-                consistency_levels.append(c)
-
-        for expr in ("", 'id != ""'):
-            for cl in consistency_levels:
-                qn = self._count_star_query(collection_name, expr, cl)
-                if qn is not None:
-                    return qn
-
-        return stats_n
-
     def get_collection_stats(self) -> Dict[str, int]:
         """
-        Get statistics for all collections.
+        Count current records in each collection using strong consistency.
+
+        Missing collections contribute zero. Errors querying existing collections
+        propagate to the caller. Counts are read separately, so concurrent writes
+        can be observed at different stages across the three collections.
 
         Returns:
             Dict with entity_count, relation_count, passage_count.
@@ -1135,13 +1451,26 @@ class MilvusStore:
             "passage_count": 0,
         }
 
-        if self.client.has_collection(self.entity_collection):
-            stats["entity_count"] = self._accurate_row_count(self.entity_collection)
-
-        if self.client.has_collection(self.relation_collection):
-            stats["relation_count"] = self._accurate_row_count(self.relation_collection)
-
-        if self.client.has_collection(self.passage_collection):
-            stats["passage_count"] = self._accurate_row_count(self.passage_collection)
+        with start_span(
+            "vgrag.milvus.collection_stats",
+            {
+                "db.system": "milvus",
+                "vgrag.collection_count": 3,
+            },
+        ):
+            for key, collection_name in (
+                ("entity_count", self.entity_collection),
+                ("relation_count", self.relation_collection),
+                ("passage_count", self.passage_collection),
+            ):
+                if not self.client.has_collection(collection_name):
+                    continue
+                result = self.client.query(
+                    collection_name=collection_name,
+                    filter="",
+                    output_fields=["count(*)"],
+                    consistency_level="Strong",
+                )
+                stats[key] = int(result[0]["count(*)"])
 
         return stats

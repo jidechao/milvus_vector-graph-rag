@@ -1,27 +1,73 @@
-# Vector Graph RAG — Frontend
+# React + TypeScript + Vite
 
-React 19 + TypeScript + Vite 7 + Tailwind CSS v4. Multi-page UI for the Vector Graph RAG FastAPI backend: dashboards, ingestion, document CRUD, and a query workbench with graph visualization (React Flow).
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-## Scripts
+Currently, two official plugins are available:
 
-```bash
-npm install
-npm run dev          # http://localhost:5173 (default Vite)
-npm run build
-npm run lint
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+
+## React Compiler
+
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the ESLint configuration
+
+If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+
+```js
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+
+      // Remove tseslint.configs.recommended and replace with this
+      tseslint.configs.recommendedTypeChecked,
+      // Alternatively, use this for stricter rules
+      tseslint.configs.strictTypeChecked,
+      // Optionally, add this for stylistic rules
+      tseslint.configs.stylisticTypeChecked,
+
+      // Other configs...
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
 ```
 
-## API proxy (development)
+You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
 
-`vite.config.ts` proxies `/api` to the FastAPI server and strips the `/api` prefix. Backend port defaults to `8000` or repo-root `VGRAG_API_PORT` (loaded from the parent directory). The Axios client in `src/api/client.ts` uses `baseURL: '/api'`.
+```js
+// eslint.config.js
+import reactX from 'eslint-plugin-react-x'
+import reactDom from 'eslint-plugin-react-dom'
 
-## Stack highlights
-
-- **Routing:** `react-router-dom` — `/dashboard`, `/query`, `/knowledge-bases`, `/documents`, `/ingestion`
-- **Data:** `@tanstack/react-query`, `axios`
-- **State:** `zustand` (persisted dataset id under key `vgrag-dataset`; invalid ids reset when `/graphs` loads)
-- **Graph:** `@xyflow/react`
-- **Answers:** `react-markdown` + `remark-gfm`, Tailwind Typography (`@tailwindcss/typography` via `@plugin` in `src/index.css`)
-- **Graph labels:** API id `unprefixed` is shown in Chinese in the UI (`src/utils/graphDisplayName.ts`); path segments for `/graph/{name}/…` are URL-encoded.
-
-For project-wide documentation (graph naming, stats, `.env` vs ingestion target), see the [root README](../README.md).
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+      // Enable lint rules for React
+      reactX.configs['recommended-typescript'],
+      // Enable lint rules for React DOM
+      reactDom.configs.recommended,
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+```

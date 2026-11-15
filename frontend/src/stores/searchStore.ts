@@ -35,8 +35,8 @@ function buildTimelineSteps(result: QueryResponse): TimelineStep[] {
   const rerankResult = result.rerank_result
 
   // Get all IDs for reference
-  const allEntityIds = result.subgraph?.entity_ids || []
-  const allRelationIds = result.subgraph?.relation_ids || []
+  const allEntityIds = result.subgraph.entity_ids
+  const allRelationIds = result.subgraph.relation_ids
   const seedEntityIds = retrievalDetail?.entity_ids || []
   const seedRelationIds = retrievalDetail?.relation_ids || []
   const selectedRelationIds = rerankResult?.selected_relation_ids || []
@@ -55,9 +55,9 @@ function buildTimelineSteps(result: QueryResponse): TimelineStep[] {
   if (retrievalDetail) {
     steps.push({
       id: 'retrieve-seeds',
-      label: '检索种子节点',
+      label: 'Retrieve Seeds',
       status: 'completed',
-      description: '通过向量检索获取初始实体和关系',
+      description: 'Vector search for initial entities and relations',
       nodeStatus: {
         seedEntityIds: [...seedEntityIds],
         seedRelationIds: [...seedRelationIds],
@@ -74,7 +74,7 @@ function buildTimelineSteps(result: QueryResponse): TimelineStep[] {
   }
 
   // Step 2+: Expansion steps from history
-  const history = result.subgraph?.expansion_history || []
+  const history = result.subgraph.expansion_history || []
   let currentExpandedEntities: string[] = []
   let currentExpandedRelations: string[] = []
   let expandStepNumber = 1
@@ -104,7 +104,7 @@ function buildTimelineSteps(result: QueryResponse): TimelineStep[] {
 
     steps.push({
       id: `expand-${expandStepNumber}`,
-      label: '扩展子图',
+      label: 'Expand Subgraph',
       status: 'completed',
       description: step.description || step.operation,
       nodeStatus: {
@@ -127,9 +127,9 @@ function buildTimelineSteps(result: QueryResponse): TimelineStep[] {
   if (result.eviction_result?.occurred) {
     steps.push({
       id: 'eviction',
-      label: '关系裁剪结果',
+      label: 'Eviction Result',
       status: 'completed',
-      description: `关系数量从 ${result.eviction_result.before_count} 裁剪至 ${result.eviction_result.after_count}`,
+      description: `Evicted from ${result.eviction_result.before_count} to ${result.eviction_result.after_count} relations`,
       nodeStatus: {
         seedEntityIds: [...seedEntityIds],
         seedRelationIds: [...seedRelationIds],
@@ -149,9 +149,9 @@ function buildTimelineSteps(result: QueryResponse): TimelineStep[] {
   if (rerankResult) {
     steps.push({
       id: 'rerank',
-      label: '大模型重排',
+      label: 'LLM Rerank',
       status: 'completed',
-      description: `筛选出 ${selectedRelationIds.length} 条最相关的关系`,
+      description: `Selected ${selectedRelationIds.length} most relevant relations`,
       nodeStatus: {
         seedEntityIds: [...seedEntityIds],
         seedRelationIds: [...seedRelationIds],
@@ -170,9 +170,9 @@ function buildTimelineSteps(result: QueryResponse): TimelineStep[] {
   // Step: Generate Answer
   steps.push({
     id: 'generate',
-    label: '生成答案',
+    label: 'Generate Answer',
     status: 'completed',
-    description: '大模型基于检索上下文生成答案',
+    description: 'LLM generates answer from retrieved context',
     nodeStatus: {
       seedEntityIds: [...seedEntityIds],
       seedRelationIds: [...seedRelationIds],

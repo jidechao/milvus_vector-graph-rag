@@ -1,0 +1,46 @@
+{
+  "2wikimultihopqa": {
+    "jev_single": {
+      "n": 1000,
+      "recall_at_5": 90.77499999999999,
+      "recall_at_10": 92.27499999999999
+    },
+    "jev_two": {
+      "n": 1000,
+      "recall_at_5": 95.35,
+      "recall_at_10": 95.525
+    },
+    "jev_two_114": {
+      "n": 1000,
+      "recall_at_5": 95.5,
+      "recall_at_10": 95.525
+    },
+    "naive": {
+      "n": 1000,
+      "recall_at_5": 72.725,
+      "recall_at_10": 76.775
+    }
+  },
+  "musique": {
+    "jev_single": {
+      "n": 1000,
+      "recall_at_5": 69.3,
+      "recall_at_10": 76.58333333333334
+    },
+    "jev_two": {
+      "n": 1000,
+      "recall_at_5": 76.78333333333333,
+      "recall_at_10": 82.06666666666666
+    },
+    "jev_two_114": {
+      "n": 1000,
+      "recall_at_5": 77.725,
+      "recall_at_10": 81.96666666666667
+    },
+    "naive": {
+      "n": 1000,
+      "recall_at_5": 58.03333333333334,
+      "recall_at_10": 67.15
+    }
+  }
+}

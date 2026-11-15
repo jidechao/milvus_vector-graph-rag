@@ -3,9 +3,10 @@
 export interface QueryRequest {
   question: string
   graph_name?: string
-  use_reranking?: boolean
   entity_top_k?: number
   relation_top_k?: number
+  entity_similarity_threshold?: number
+  relation_similarity_threshold?: number
   expansion_degree?: number
 }
 
@@ -15,7 +16,7 @@ export interface QueryResponse {
   question: string
   answer: string
   query_entities: string[]
-  subgraph?: SubGraph
+  subgraph: SubGraph
   retrieved_passages: string[]
   stats: Record<string, unknown>
   retrieval_detail?: RetrievalDetail
@@ -132,72 +133,12 @@ export interface NeighborResponse {
   relations: Relation[]
 }
 
-// Documents
-export interface DocumentResponse {
-  id: string
-  text: string
-  entity_ids: string[]
-  relation_ids: string[]
-}
-
-export interface ListDocumentsResponse {
-  documents: DocumentResponse[]
-  total: number
-}
-
-export interface UpdateDocumentRequest {
-  text?: string
-}
-
-export interface TripletInput {
-  subject: string
-  predicate: string
-  object: string
-}
-
-export interface AddDocumentsRequest {
-  documents: string[]
-  ids?: string[]
-  extract_triplets?: boolean
-  triplets?: TripletInput[][]
-}
-
-export interface AddDocumentsResponse {
-  num_documents: number
-  num_entities: number
-  num_relations: number
-  document_ids: string[]
-}
-
-// Import types
-export interface ImportRequest {
-  sources: string[]
-  chunk_documents: boolean
-  chunk_size: number
-  chunk_overlap: number
-  extract_triplets: boolean
-  graph_name?: string
-}
-
-export interface ImportResponse {
-  success: boolean
-  num_sources: number
-  num_documents: number
-  num_chunks: number
-  num_entities: number
-  num_relations: number
-  errors: string[]
-}
-
-export interface UploadOptions {
-  chunkDocuments?: boolean
-  chunkSize?: number
-  chunkOverlap?: number
-  extractTriplets?: boolean
-  graphName?: string
-}
-
 // Graph Node status for visualization
+// 'undiscovered' = not yet found at this step (gray/faded)
+// 'seed' = initial vector search results (orange)
+// 'expanded' = found through graph expansion (blue)
+// 'filtered' = was considered but filtered out (gray dashed)
+// 'selected' = selected by LLM rerank (green highlighted)
 export type NodeStatus = 'undiscovered' | 'seed' | 'expanded' | 'filtered' | 'selected'
 
 // Timeline step status
@@ -224,11 +165,3 @@ export interface TimelineStep {
     relationCount: number
   }
 }
-
-// SSE Stream Events
-export interface StreamEvent {
-  type: string
-  message?: string
-  [key: string]: unknown
-}
-

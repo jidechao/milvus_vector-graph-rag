@@ -17,21 +17,24 @@
   <a href="https://discord.com/invite/FG6hMJStWu"><img src="https://img.shields.io/badge/Discord-chat-7289da?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
-> 💡 Encode entities and relations as vectors in [Milvus](https://milvus.io/), replace iterative LLM agents with a single reranking pass — achieve state-of-the-art multi-hop retrieval at a fraction of the operational and computational cost.
+> 💡 Encode entities and relations as vectors in [Milvus](https://milvus.io/), retrieve multi-hop evidence with single-pass generative reranking or two-stage Jev scoring, without an iterative search loop.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/1185b651-ed72-4408-9dcd-25a74b12835b" alt="Vector Graph RAG Demo" width="800">
 </p>
 
+## What’s New
+
+- **Two-stage Jev retrieval reaches the quality–latency Pareto frontier.** See the [evaluation results](evaluation/jev/README.md).
+
 ## ✨ Features
 
 - **No Graph Database Required** — Pure vector search with Milvus, no Neo4j or other graph databases needed
-- **Single-Pass LLM Reranking** — One LLM call to rerank, no iterative agent loops (unlike IRCoT or multi-step reflection)
+- **Configurable Reranking** — Single-pass generative reranking or two-stage Jev relation and passage scoring
 - **Knowledge-Intensive Friendly** — Optimized for domains with dense factual content: legal, finance, medical, literature, etc.
 - **Zero Configuration** — Uses Milvus Lite by default, works out of the box with a single file
 - **Multi-hop Reasoning** — Subgraph expansion enables complex multi-hop question answering
-- **State-of-the-Art Performance** — 87.8% avg Recall@5 on multi-hop QA benchmarks, outperforming HippoRAG
-- **Web Console** — Multi-page React UI for ingestion, document search, graph stats, streaming queries, and Markdown answers
+- **State-of-the-Art Performance** — Two-stage Jev leads the compared baselines on MuSiQue and 2Wiki and reaches the quality–latency Pareto frontier. See the [latest results](evaluation/jev/README.md) and [historical three-dataset evaluation](docs/evaluation.md#historical-results).
 
 ## 📦 Installation
 
@@ -52,6 +55,31 @@ uv add "vector-graph-rag[loaders]"
 
 </details>
 
+<details>
+<summary><b>With additional embedding providers</b></summary>
+
+```bash
+pip install "vector-graph-rag[hf]"       # HuggingFace transformers
+pip install "vector-graph-rag[ollama]"   # Ollama
+pip install "vector-graph-rag[jina]"     # Jina AI
+pip install "vector-graph-rag[all]"      # all optional providers
+# or
+uv add "vector-graph-rag[all]"
+```
+
+</details>
+
+<details>
+<summary><b>With OpenTelemetry tracing</b></summary>
+
+```bash
+pip install "vector-graph-rag[observability]"
+# or
+uv add "vector-graph-rag[observability]"
+```
+
+</details>
+
 ## 🚀 Quick Start
 
 ```python
@@ -59,7 +87,7 @@ from vector_graph_rag import VectorGraphRAG
 
 rag = VectorGraphRAG()  # reads OPENAI_API_KEY from environment
 
-rag.add_texts([
+rag.rebuild_texts([
     "Albert Einstein developed the theory of relativity.",
     "The theory of relativity revolutionized our understanding of space and time.",
 ])
@@ -76,7 +104,7 @@ print(result.answer)
 Skip LLM extraction if you already have knowledge graph triplets:
 
 ```python
-rag.add_documents_with_triplets([
+rag.rebuild_documents_with_triplets([
     {
         "passage": "Einstein developed relativity at Princeton.",
         "triplets": [
@@ -86,6 +114,80 @@ rag.add_documents_with_triplets([
     },
 ])
 ```
+
+</details>
+
+<details>
+<summary>🔄 <b>Incremental document updates</b> — click to expand</summary>
+
+Use `upsert_documents_by_source()` when a source file, message, or page is
+created or modified. In Vector Graph RAG, a `Document` is a passage/chunk; the
+source object is identified by `metadata["source"]` or the explicit `source`
+argument. The method replaces only that source's chunks and graph references.
+Source-level writes are not transactionally atomic, but the same upsert/delete
+operation can be retried after an interruption to converge the source back to a
+consistent state.
+See the [Incremental Updates guide](docs/guides/incremental-updates.md) for parser
+integration, source key design, and retry recommendations.
+
+```python
+from langchain_core.documents import Document
+
+rag.upsert_documents_by_source(
+    documents=[
+        Document(
+            page_content="Einstein developed relativity at Princeton.",
+            metadata={
+                "source": "file:file-123",
+                "triplets": [
+                    ["Einstein", "developed", "relativity"],
+                    ["Einstein", "worked at", "Princeton"],
+                ],
+            },
+        ),
+    ],
+    extract_triplets=False,
+)
+
+rag.delete_documents_by_source("file:file-123")
+```
+
+> **Migration note:** v0.1.5 exposed `upsert_documents(document_id=...)` and
+> `delete_documents(document_id)`. These names were removed in v0.2.0 because
+> `Document` means passage/chunk in this project. Use the `*_by_source()` APIs
+> shown above.
+
+The legacy `add_*` ingestion helpers rebuild the full knowledge base and are planned
+for removal in v1.0.0. For explicit full refreshes, use `rebuild_texts()`,
+`rebuild_documents()`, or `rebuild_documents_with_triplets()`.
+
+</details>
+
+<details>
+<summary>📈 <b>OpenTelemetry tracing</b> — click to expand</summary>
+
+Vector Graph RAG can emit OpenTelemetry spans for ingestion, loaders,
+embeddings, Milvus operations, retrieval, and generation. Configure the
+OpenTelemetry SDK/exporter in your application, then attach request context
+around RAG calls:
+
+```python
+from vector_graph_rag import VectorGraphRAG, observability_context
+
+rag = VectorGraphRAG(collection_prefix="my_project")
+
+with observability_context(
+    request_id="req-123",
+    tenant_id="tenant-a",
+    graph_name="my_project",
+    source="file-123",
+):
+    rag.upsert_documents_by_source(chunks, source="file-123")
+```
+
+The built-in spans avoid document text, prompts, query text, generated answers,
+filters, and full URLs by default. See the
+[Observability guide](docs/guides/observability.md) for setup details.
 
 </details>
 
@@ -105,7 +207,7 @@ result = importer.import_sources([
 ])
 
 rag = VectorGraphRAG(milvus_uri="./my_graph.db")
-rag.add_documents(result.documents, extract_triplets=True)
+rag.rebuild_documents(result.documents, extract_triplets=True)
 
 result = rag.query("What did Einstein discover?")
 print(result.answer)
@@ -120,6 +222,7 @@ print(result.answer)
 rag = VectorGraphRAG(
     milvus_uri="./my_data.db",          # or remote Milvus / Zilliz Cloud
     llm_model="gpt-4o",
+    embedding_provider="openai",
     embedding_model="text-embedding-3-large",
     collection_prefix="my_project",     # isolate multiple datasets
 )
@@ -129,17 +232,14 @@ All settings can also be configured via environment variables with `VGRAG_` pref
 
 ```bash
 VGRAG_LLM_MODEL=gpt-4o
+VGRAG_EMBEDDING_PROVIDER=openai
 VGRAG_EMBEDDING_MODEL=text-embedding-3-large
 VGRAG_MILVUS_URI=http://localhost:19530
-# Optional: default Milvus collection prefix when graph_name is omitted (see README “Graph naming”)
-# VGRAG_COLLECTION_PREFIX=myproj
-# Optional: Milvus consistency (also used in stats count(*) fallback order after Strong)
-# VGRAG_MILVUS_CONSISTENCY_LEVEL=Bounded
 ```
 
 </details>
 
-> 📖 Full Python API reference → [Python API docs](https://zilliztech.github.io/vector-graph-rag/python-api/)
+> 📖 Full Python API reference → [Python API docs](https://zilliztech.github.io/vector-graph-rag/reference/python-api/)
 
 ## 🔬 How It Works
 
@@ -163,11 +263,13 @@ Question → Entity Extraction → Vector Search → Subgraph Expansion → LLM 
 4. **Single-pass LLM reranking** selects the most relevant passages
 5. Generate answer from selected passages
 
-> 📖 Detailed pipeline walkthrough with diagrams → [How It Works](https://zilliztech.github.io/vector-graph-rag/how-it-works/) · [Design Philosophy](https://zilliztech.github.io/vector-graph-rag/design-philosophy/)
+> 📖 Detailed pipeline walkthrough with diagrams → [How It Works](https://zilliztech.github.io/vector-graph-rag/architecture/how-it-works/) · [Design Philosophy](https://zilliztech.github.io/vector-graph-rag/architecture/design-philosophy/)
 
 ## 📊 Evaluation Results
 
-Evaluated on three multi-hop QA benchmarks (Recall@5):
+### Historical evaluation — before September 2026
+
+Before introducing Jev, we evaluated Vector Graph RAG on three multi-hop QA benchmarks (Recall@5):
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/221a0c8d-a414-4234-ac8b-ba4223aaa2cc" alt="Recall@5: Naive RAG vs Vector Graph RAG" width="700">
@@ -183,6 +285,16 @@ Evaluated on three multi-hop QA benchmarks (Recall@5):
 ¹ [HippoRAG (NeurIPS 2024)](https://arxiv.org/abs/2405.14831)  ² [HippoRAG 2 (2025)](https://arxiv.org/abs/2502.14802)
 
 > 📖 Detailed analysis and reproduction steps → [Evaluation](https://zilliztech.github.io/vector-graph-rag/evaluation/)
+
+### Latest evaluation — October 2026: two-stage Jev
+
+**Two-stage Jev reaches the quality–latency Pareto frontier.**
+
+**Jev 1.14 achieves 86.61% average Recall@5**, the highest among the compared methods, with **approximately 4.9 seconds of estimated direct API latency**. On MuSiQue and 2Wiki (1,000 questions each), two-stage Jev reaches the Pareto frontier using the displayed timings. This two-dataset result is separate from the historical three-dataset average above.
+
+![Quality and additional model latency](docs/assets/evaluation/quality-latency.png)
+
+See [Evaluation Results](evaluation/jev/README.md) for the gains over relation-only Jev and other baselines, timing details and reproduction instructions.
 
 ## 🗄️ Milvus Backend
 
@@ -225,73 +337,40 @@ rag = VectorGraphRAG(milvus_uri="http://localhost:19530")
 
 ## 🖥️ Frontend & REST API
 
-Vector Graph RAG ships with a **React + TypeScript + Vite** web UI and a **FastAPI** backend. The UI uses a **multi-page layout** (sidebar navigation) so you can operate every exposed endpoint without writing scripts.
-
-**Web UI pages**
-
-| Route | Purpose |
-|-------|---------|
-| `/dashboard` | System health, settings summary, graph overview |
-| `/query` | Query workbench: question input, optional **SSE streaming**, retrieval timeline, **Markdown-rendered** answer, subgraph visualization |
-| `/knowledge-bases` | List graphs, view stats, delete a knowledge base |
-| `/documents` | Search passages (`GET /documents?q=…`), view / edit / delete by ID |
-| `/ingestion` | Add text (`POST /add_documents`), import URLs or paths (`POST /import`), file upload (`POST /upload`) |
-
-**Ingestion & Milvus graph naming**
-
-- **Append, not replace:** `add_documents`, `import`, and `upload` **append** rows to the target collections. The Python `VectorGraphRAG.add_documents` / `add_texts` APIs behave the same way. To remove an entire dataset, use `DELETE /graph/{name}` (or the UI).
-- **`GET /graphs` graph `name`:** **`unprefixed`** means the bare triplet `vgrag_entities` / `vgrag_relations` / `vgrag_passages` (no `collection_prefix`). Any other string (including **`default`**) is the **literal** Milvus prefix, e.g. `default` → `default_vgrag_*`. This avoids confusing “default graph” with “prefix named `default`”.
-- **`VGRAG_COLLECTION_PREFIX` (.env):** When an API call **omits** `graph_name` (e.g. some query paths), the server uses this value as `collection_prefix`. It does **not** override an explicit `graph_name` you send from the ingestion form.
-- **Ingestion “target knowledge base”:** Passed as `graph_name`. A **new** name not yet listed in `GET /graphs` will still **create** `{name}_vgrag_*` on first successful write. Use names that match `/graphs` or your header selector; avoid treating **`unprefixed`** as a casual project label.
-
-**Knowledge base stats (`GET /graph/{name}/stats`)**
-
-Counts are computed with **`load_collection`** plus **`query(..., output_fields=["count(*)"])`**, trying **`Strong`** consistency first (then `VGRAG_MILVUS_CONSISTENCY_LEVEL`, `Bounded`, `Eventually`, `Session`), because Milvus **`get_collection_stats` / segment `row_count` alone often under-counts** (e.g. growing segments). If aggregation fails, the API falls back to segment statistics.
-
-**Run locally**
+Vector Graph RAG includes a React-based frontend for interactive graph visualization and a FastAPI backend.
 
 ```bash
-# Backend (from repo root; install package in editable mode if needed: pip install -e .)
+# Backend
 uv sync --extra api
 uv run uvicorn vector_graph_rag.api.app:app --host 0.0.0.0 --port 8000
 
-# Frontend — dev server proxies /api → FastAPI (see frontend/vite.config.ts)
+# Frontend
 cd frontend && npm install && npm run dev
 ```
-
-The frontend Axios client uses `baseURL: '/api'`. In **development**, Vite rewrites `/api/*` to `http://localhost:<port>/*` on the backend (default port from repo-root `.env`: `VGRAG_API_PORT`, else `8000`). **Production** builds that talk to FastAPI directly should either serve the API behind the same host under `/api` or change the client `baseURL` / reverse-proxy rules to match.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/8cc8e594-aed7-4ef5-8c3b-e5ff54275b64" alt="Frontend — interactive graph visualization with 4-step retrieval" width="800">
 </p>
 
-**REST endpoints** on the FastAPI app (paths below are relative to the API root, e.g. `http://localhost:8000/...`). When using `npm run dev`, call them from the browser as `/api/...` so the Vite proxy forwards correctly.
-
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/settings` | GET | Non-secret configuration (models, Milvus URI, etc.) |
-| `/graphs` | GET | List available graphs / collection sets |
-| `/graph/{name}` | DELETE | Drop a graph and its Milvus collections |
-| `/graph/{name}/stats` | GET | Entity / relation / passage counts |
-| `/graph/{name}/neighbors/{entity_id}` | GET | Neighbors of an entity (lazy expansion) |
-| `/add_documents` | POST | Add raw text documents (optional triplets) |
-| `/import` | POST | Import from URLs or file paths (server-side) |
-| `/upload` | POST | Multipart file upload |
-| `/documents` | GET | Vector search over passages (`query`, `top_k`, optional `graph_name`) |
-| `/documents/{id}` | GET / PUT / DELETE | Read, update, or delete one document |
-| `/query` | POST | Full Graph RAG query (JSON response with subgraph) |
-| `/query/stream` | POST | Same query as **Server-Sent Events** (tokens/progress); the UI may follow with `/query` when the stream `done` payload omits the full subgraph for visualization |
+| `/api/health` | GET | Health check |
+| `/api/graphs` | GET | List available graphs |
+| `/api/graph/{name}/stats` | GET | Get graph statistics |
+| `/api/query` | POST | Query the knowledge graph |
+| `/api/documents` | POST | Add documents |
+| `/api/import` | POST | Import from URLs/paths |
+| `/api/upload` | POST | Upload files |
 
-Open **interactive API docs** at `http://localhost:8000/docs` after starting the server.
+See API docs at `http://localhost:8000/docs` after starting the server.
 
-> 📖 Full endpoint reference → [REST API docs](https://zilliztech.github.io/vector-graph-rag/rest-api/) · [Frontend guide](https://zilliztech.github.io/vector-graph-rag/frontend/)
+> 📖 Full endpoint reference → [REST API docs](https://zilliztech.github.io/vector-graph-rag/reference/rest-api/) · [Frontend guide](https://zilliztech.github.io/vector-graph-rag/guides/frontend/)
 
 ## 📚 Links
 
 - [Documentation](https://zilliztech.github.io/vector-graph-rag/) — full guides, API reference, and architecture details
-- [How It Works](https://zilliztech.github.io/vector-graph-rag/how-it-works/) — pipeline walkthrough with diagrams
-- [Design Philosophy](https://zilliztech.github.io/vector-graph-rag/design-philosophy/) — why pure vector search, no graph DB
+- [How It Works](https://zilliztech.github.io/vector-graph-rag/architecture/how-it-works/) — pipeline walkthrough with diagrams
+- [Design Philosophy](https://zilliztech.github.io/vector-graph-rag/architecture/design-philosophy/) — why pure vector search, no graph DB
 - [Milvus](https://milvus.io/) — the vector database powering Vector Graph RAG
 - [FAQ](https://zilliztech.github.io/vector-graph-rag/faq/) — common questions and troubleshooting
 

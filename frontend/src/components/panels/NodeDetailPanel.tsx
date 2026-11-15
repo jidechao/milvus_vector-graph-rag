@@ -54,7 +54,7 @@ function NodeDetailPanel() {
               <div className="flex items-center gap-2 mb-2">
                 <Link2 className="w-4 h-4 text-slate-400" />
                 <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">
-                  关系 ({connectedRelations.length})
+                  Relations ({connectedRelations.length})
                 </span>
               </div>
               <div className="space-y-2">
@@ -70,11 +70,11 @@ function NodeDetailPanel() {
                     </div>
                   ))
                 ) : (
-                  <p className="text-xs text-slate-400">暂无关系</p>
+                  <p className="text-xs text-slate-400">No relations</p>
                 )}
                 {connectedRelations.length > 5 && (
                   <p className="text-xs text-slate-400">
-                    + 还有 {connectedRelations.length - 5} 条
+                    +{connectedRelations.length - 5} more
                   </p>
                 )}
               </div>
@@ -85,7 +85,7 @@ function NodeDetailPanel() {
               <div className="flex items-center gap-2 mb-2">
                 <FileText className="w-4 h-4 text-slate-400" />
                 <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">
-                  来源段落 ({connectedPassages.length})
+                  Sources ({connectedPassages.length})
                 </span>
               </div>
               <div className="space-y-2">
@@ -99,11 +99,11 @@ function NodeDetailPanel() {
                     </div>
                   ))
                 ) : (
-                  <p className="text-xs text-slate-400">暂无来源段落</p>
+                  <p className="text-xs text-slate-400">No source passages</p>
                 )}
                 {connectedPassages.length > 3 && (
                   <p className="text-xs text-slate-400">
-                    + 还有 {connectedPassages.length - 3} 条
+                    +{connectedPassages.length - 3} more
                   </p>
                 )}
               </div>

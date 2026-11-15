@@ -1,14 +1,41 @@
 """Tests for API endpoints."""
 
+import os
+import tempfile
+from contextlib import suppress
+from unittest.mock import MagicMock, patch
+
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import MagicMock, patch
-import tempfile
-import os
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from tests.conftest import close_milvus_store
 from vector_graph_rag.api.app import create_app
 from vector_graph_rag.config import Settings
 from vector_graph_rag.graph.graph import Graph
+from vector_graph_rag.models import ExtractionResult
+
+
+def _attach_span_exporter(exporter: InMemorySpanExporter) -> None:
+    """Attach a test exporter to the active OpenTelemetry provider."""
+    processor = SimpleSpanProcessor(exporter)
+    provider = trace.get_tracer_provider()
+    if hasattr(provider, "add_span_processor"):
+        provider.add_span_processor(processor)
+        return
+
+    provider = TracerProvider()
+    provider.add_span_processor(processor)
+    try:
+        trace.set_tracer_provider(provider)
+    except Exception:
+        current_provider = trace.get_tracer_provider()
+        if not hasattr(current_provider, "add_span_processor"):
+            raise
+        current_provider.add_span_processor(processor)
 
 
 @pytest.fixture
@@ -20,13 +47,15 @@ def test_settings():
     yield Settings(
         milvus_uri=temp_uri,
         openai_api_key="test-api-key",
-        llm_model="gpt-4o-mini",
+        llm_model="gpt-6-luna",
+        embedding_provider="openai",
         embedding_model="text-embedding-3-small",
         collection_prefix="api_test",
     )
 
-    if os.path.exists(temp_uri):
-        os.unlink(temp_uri)
+    for path in [temp_uri, f"{temp_uri}.lock"]:
+        if os.path.exists(path):
+            os.unlink(path)
 
 
 @pytest.fixture
@@ -49,13 +78,26 @@ def app(test_settings, mock_embedding_model):
     graph.create_collections(drop_existing=True)
     application.state.graph_instances["default"] = graph
 
-    return application
+    yield application
+
+    with suppress(Exception):
+        graph.drop_collections()
+    close_milvus_store(graph._store)
 
 
 @pytest.fixture
 def client(app):
     """Create test client."""
     return TestClient(app)
+
+
+@pytest.fixture
+def span_exporter():
+    """Create an in-memory span exporter for API middleware assertions."""
+    exporter = InMemorySpanExporter()
+    _attach_span_exporter(exporter)
+    yield exporter
+    exporter.clear()
 
 
 class TestHealthEndpoint:
@@ -69,6 +111,63 @@ class TestHealthEndpoint:
         data = response.json()
         assert data["status"] == "ok"
         assert "version" in data
+
+
+class TestGraphStatsEndpoint:
+    """Statistics distinguish an empty graph from a storage failure."""
+
+    def test_stats_counts_existing_passages_after_deletion(self, client, app):
+        graph = app.state.graph_instances["default"]
+        graph.create_passage("First passage.", id="stats_1")
+        graph.create_passage("Second passage.", id="stats_2")
+        graph.delete_passage("stats_1")
+
+        response = client.get("/graph/default/stats")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "graph_name": "default",
+            "entity_count": 0,
+            "relation_count": 0,
+            "passage_count": 1,
+        }
+
+    def test_stats_reports_storage_failure(self, client, app):
+        graph = app.state.graph_instances["default"]
+        with patch.object(graph._store.client, "query", side_effect=RuntimeError("Unavailable")):
+            response = client.get("/graph/default/stats")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to retrieve graph statistics."}
+
+
+class TestObservabilityMiddleware:
+    """Tests for API request tracing."""
+
+    def test_request_context_headers_are_added_to_span(self, client, span_exporter):
+        """Test request headers and graph context are attached to API spans."""
+        response = client.get(
+            "/health?graph_name=finance",
+            headers={
+                "x-request-id": "req-api",
+                "x-tenant-id": "tenant-api",
+            },
+        )
+
+        assert response.status_code == 200
+
+        spans = [
+            span for span in span_exporter.get_finished_spans() if span.name == "vgrag.api.request"
+        ]
+        assert spans
+        span = spans[-1]
+        assert span.attributes["vgrag.request_id"] == "req-api"
+        assert span.attributes["vgrag.tenant_id"] == "tenant-api"
+        assert span.attributes["vgrag.graph_name"] == "finance"
+        assert span.attributes["http.request.method"] == "GET"
+        assert span.attributes["http.response.status_code"] == 200
+        assert span.attributes["vgrag.has_request_id"] is True
+        assert span.attributes["vgrag.has_tenant_id"] is True
 
 
 class TestListGraphsEndpoint:
@@ -120,10 +219,10 @@ class TestDocumentCRUDEndpoints:
 class TestAddDocumentsEndpoint:
     """Tests for add documents endpoint."""
 
-    @patch("vector_graph_rag.rag.VectorGraphRAG.add_documents")
+    @patch("vector_graph_rag.rag.VectorGraphRAG.rebuild_texts")
     def test_add_documents_basic(self, mock_add, client):
         """Test adding documents endpoint."""
-        # Mock the add_documents method
+        # Mock the full-rebuild ingestion method
         mock_result = MagicMock()
         mock_result.documents = []
         mock_result.entities = []
@@ -134,6 +233,7 @@ class TestAddDocumentsEndpoint:
             "/add_documents",
             json={
                 "documents": ["Test document 1", "Test document 2"],
+                "metadatas": [{"source": "test1"}, {"source": "test2"}],
                 "extract_triplets": False,
             },
         )
@@ -141,6 +241,9 @@ class TestAddDocumentsEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert "num_documents" in data
+        args, kwargs = mock_add.call_args
+        assert args[0] == ["Test document 1", "Test document 2"]
+        assert kwargs["metadatas"] == [{"source": "test1"}, {"source": "test2"}]
 
 
 class TestQueryEndpoint:
@@ -162,10 +265,117 @@ class TestQueryEndpoint:
 
         response = client.post(
             "/query",
-            json={"question": "Test question"},
+            json={"question": "Test question", "filter": 'source == "test"'},
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["query"] == "Test question"
+        assert data["question"] == "Test question"
         assert "answer" in data
+        _, kwargs = mock_query.call_args
+        assert kwargs["filter"] == 'source == "test"'
+
+
+class TestChunkingValidation:
+    """Invalid chunking parameters are rejected instead of failing mid-import."""
+
+    @pytest.fixture
+    def import_client(self, test_settings):
+        application = create_app(test_settings)
+        rag = MagicMock()
+        rag.rebuild_documents.side_effect = lambda documents, **kwargs: ExtractionResult(
+            documents=documents
+        )
+        application.state.rag_instances["default"] = rag
+        converter = MagicMock()
+        converter.supported_extensions = set()
+        with patch("vector_graph_rag.loaders.DocumentConverter", return_value=converter):
+            with TestClient(application) as client:
+                yield client, rag
+
+    def test_import_rejects_overlap_not_smaller_than_chunk_size(self, import_client):
+        client, rag = import_client
+        response = client.post(
+            "/import",
+            json={
+                "sources": ["/tmp/does-not-matter.txt"],
+                "chunk_size": 100,
+                "chunk_overlap": 100,
+            },
+        )
+
+        assert response.status_code == 422
+        assert "chunk_overlap" in response.text
+        rag.rebuild_documents.assert_not_called()
+
+    def test_upload_rejects_overlap_not_smaller_than_chunk_size(self, import_client):
+        client, rag = import_client
+        response = client.post(
+            "/upload",
+            files={"files": ("note.txt", b"hello world", "text/plain")},
+            data={"chunk_documents": "true", "chunk_size": "100", "chunk_overlap": "150"},
+        )
+
+        assert response.status_code == 400
+        assert "chunk_overlap" in response.text
+        rag.rebuild_documents.assert_not_called()
+
+    @staticmethod
+    def import_mixed_files(client, endpoint, tmp_path, chunk_overlap):
+        short_text = "short file"
+        long_text = "0123456789" * 30
+        if endpoint == "/import":
+            short_path = tmp_path / "short.txt"
+            long_path = tmp_path / "long.txt"
+            short_path.write_text(short_text)
+            long_path.write_text(long_text)
+            return client.post(
+                endpoint,
+                json={
+                    "sources": [str(short_path), str(long_path)],
+                    "chunk_size": 100,
+                    "chunk_overlap": chunk_overlap,
+                    "extract_triplets": False,
+                },
+            )
+        return client.post(
+            endpoint,
+            files=[
+                ("files", ("short.txt", short_text.encode(), "text/plain")),
+                ("files", ("long.txt", long_text.encode(), "text/plain")),
+            ],
+            data={"chunk_size": 100, "chunk_overlap": chunk_overlap, "extract_triplets": "false"},
+        )
+
+    @pytest.mark.parametrize("endpoint, expected_status", [("/import", 422), ("/upload", 400)])
+    @pytest.mark.parametrize("chunk_overlap", [100, 200])
+    def test_mixed_file_import_rejects_invalid_chunking_before_writing(
+        self, import_client, tmp_path, endpoint, expected_status, chunk_overlap
+    ):
+        """A long file cannot disappear from an otherwise successful short-file import."""
+        client, rag = import_client
+        response = self.import_mixed_files(client, endpoint, tmp_path, chunk_overlap)
+
+        assert response.status_code == expected_status
+        assert "chunk_overlap" in response.text
+        rag.rebuild_documents.assert_not_called()
+
+    @pytest.mark.parametrize("endpoint", ["/import", "/upload"])
+    def test_mixed_file_import_preserves_all_chunks_with_valid_parameters(
+        self, import_client, tmp_path, endpoint
+    ):
+        """Valid chunking imports the short file and every chunk of the long file."""
+        client, rag = import_client
+        response = self.import_mixed_files(client, endpoint, tmp_path, chunk_overlap=20)
+
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        assert response.json()["num_sources"] == 2
+        assert response.json()["num_chunks"] == 5
+        assert response.json()["errors"] == []
+        rag.rebuild_documents.assert_called_once()
+        documents = rag.rebuild_documents.call_args.kwargs["documents"]
+        long_text = "0123456789" * 30
+        assert [document.page_content for document in documents] == ["short file"] + [
+            long_text[index : index + 100] for index in range(0, len(long_text), 80)
+        ]

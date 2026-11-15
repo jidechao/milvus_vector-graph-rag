@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { Database, Check, ChevronDown, Plus } from 'lucide-react'
 import { cn } from '@/utils/cn'
 import { useGraphs } from '@/api/queries'
-import { graphDisplayName } from '@/utils/graphDisplayName'
 
 interface GraphSelectorProps {
   value: string
@@ -39,13 +38,7 @@ export function GraphSelector({ value, onChange, onCreateNew }: GraphSelectorPro
           )}
         >
           <span className="font-medium text-slate-700 truncate">
-            {isLoading
-              ? 'Loading...'
-              : selectedGraph
-                ? graphDisplayName(selectedGraph.name)
-                : value
-                  ? graphDisplayName(value)
-                  : 'Select knowledge base'}
+            {isLoading ? 'Loading...' : selectedGraph?.name || value || 'Select knowledge base'}
           </span>
           <ChevronDown
             className={cn(
@@ -90,7 +83,7 @@ export function GraphSelector({ value, onChange, onCreateNew }: GraphSelectorPro
                             value === graph.name ? 'text-blue-700' : 'text-slate-700'
                           )}
                         >
-                          {graphDisplayName(graph.name)}
+                          {graph.name}
                         </div>
                         <div className="text-xs text-slate-500">
                           {/* We'll add stats later */}
@@ -135,10 +128,7 @@ export function GraphSelector({ value, onChange, onCreateNew }: GraphSelectorPro
       {selectedGraph && (
         <div className="text-xs text-slate-500">
           <span className="inline-flex items-center gap-1">
-            💡 Importing to:{' '}
-            <span className="font-medium text-slate-700">
-              {graphDisplayName(selectedGraph.name)}
-            </span>
+            💡 Importing to: <span className="font-medium text-slate-700">{selectedGraph.name}</span>
           </span>
         </div>
       )}

@@ -1,13 +1,22 @@
 """Pytest configuration and fixtures for Vector Graph RAG tests."""
 
 import os
-import pytest
 import tempfile
-from unittest.mock import MagicMock, patch
+from contextlib import suppress
+from unittest.mock import MagicMock
+
+import pytest
 
 from vector_graph_rag.config import Settings
-from vector_graph_rag.storage.milvus import MilvusStore
 from vector_graph_rag.graph.graph import Graph
+from vector_graph_rag.storage.milvus import MilvusStore
+
+
+def close_milvus_store(store: MilvusStore) -> None:
+    """Close the underlying Milvus client if the installed pymilvus supports it."""
+    close = getattr(store.client, "close", None)
+    if callable(close):
+        close()
 
 
 @pytest.fixture
@@ -16,8 +25,9 @@ def temp_milvus_uri():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         yield f.name
     # Cleanup
-    if os.path.exists(f.name):
-        os.unlink(f.name)
+    for path in [f.name, f"{f.name}.lock"]:
+        if os.path.exists(path):
+            os.unlink(path)
 
 
 @pytest.fixture
@@ -26,7 +36,8 @@ def mock_settings(temp_milvus_uri):
     return Settings(
         milvus_uri=temp_milvus_uri,
         openai_api_key="test-api-key",
-        llm_model="gpt-4o-mini",
+        llm_model="gpt-6-luna",
+        embedding_provider="openai",
         embedding_model="text-embedding-3-small",
         collection_prefix="test",
     )
@@ -52,7 +63,9 @@ def milvus_store(mock_settings, mock_embedding_model):
     )
     store.create_collections(drop_existing=True)
     yield store
-    store.drop_collections()
+    with suppress(Exception):
+        store.drop_collections()
+    close_milvus_store(store)
 
 
 @pytest.fixture
@@ -64,4 +77,6 @@ def graph(mock_settings, mock_embedding_model):
     )
     g.create_collections(drop_existing=True)
     yield g
-    g.drop_collections()
+    with suppress(Exception):
+        g.drop_collections()
+    close_milvus_store(g._store)

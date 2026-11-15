@@ -37,10 +37,31 @@ Frequently asked questions about Vector Graph RAG — covering when to use it, c
     result = importer.import_sources(["/path/to/large_document.pdf"])
 
     rag = VectorGraphRAG(milvus_uri="./my_graph.db")
-    rag.add_documents(result.documents, extract_triplets=True)
+    rag.rebuild_documents(result.documents, extract_triplets=True)
     ```
 
     For very large corpora, consider using a remote Milvus instance rather than Milvus Lite for better performance and scalability.
+
+??? note "How do I update or delete one source document?"
+    Use `upsert_documents_by_source()` for source create/update and `delete_documents_by_source()` for delete. A source can be a file, web page, message, or another business-level object. Its parsed chunks are passed as LangChain `Document` objects, and each chunk should carry the same stable `metadata["source"]` value.
+
+    ```python
+    from langchain_core.documents import Document
+
+    rag.upsert_documents_by_source(
+        documents=[
+            Document(
+                page_content="Updated document chunk text.",
+                metadata={"source": "file-123", "page": 1},
+            )
+        ],
+        extract_triplets=True,
+    )
+
+    rag.delete_documents_by_source("file-123")
+    ```
+
+    Incremental updates replace only the chunks and graph references for that source value. They are not transactionally atomic. If a write is interrupted, rerun the same source operation to converge the source back to a consistent state. See [Incremental Updates](guides/incremental-updates.md) for the full parser, CUD, and retry pattern.
 
 ??? note "Can I use local/open-source LLMs?"
     Yes. Vector Graph RAG uses the OpenAI-compatible API format, so any LLM that exposes an OpenAI-compatible endpoint will work. This includes local models served via [Ollama](https://ollama.com/), [vLLM](https://github.com/vllm-project/vllm), [LM Studio](https://lmstudio.ai/), or any other OpenAI-compatible server. You can configure the base URL and model name when initializing the RAG instance. Keep in mind that triplet extraction and reranking quality depend heavily on the LLM's capability — weaker models may produce incomplete or inaccurate triplets, which directly affects retrieval quality. For best results, use a model with strong instruction-following and reasoning abilities.
@@ -70,7 +91,11 @@ Frequently asked questions about Vector Graph RAG — covering when to use it, c
     ```
 
 ??? note "Can I use my own embeddings?"
-    Vector Graph RAG uses OpenAI embedding models by default (`text-embedding-3-large`), but you can configure the embedding model via the `embedding_model` parameter. Any model accessible through the OpenAI-compatible API will work. If you are using a local or custom embedding endpoint, set the appropriate base URL and model name. The embedding dimensionality is detected automatically. Note that all entities, relations, and passages in a single graph must use the same embedding model — mixing models within one collection prefix is not supported.
+    Yes. New applications should set both `embedding_provider` and `embedding_model`.
+    Supported providers are `openai`, `huggingface`, `google`/`gemini`, `voyage`, `jina`, `mistral`, `ollama`, `local`, and `onnx`.
+    Install the matching optional extra, such as `vector-graph-rag[hf]`, `vector-graph-rag[ollama]`, or `vector-graph-rag[all]`.
+    If `embedding_provider` is omitted, Vector Graph RAG keeps a legacy provider inference path for compatibility, but that path is deprecated and planned for removal in v1.0.0.
+    The embedding dimensionality is detected automatically. All entities, relations, and passages in a single graph must use the same embedding provider and model — mixing embeddings within one collection prefix is not supported.
 
 ??? note "How do I deploy to production?"
     For production deployments, use a remote Milvus instance instead of Milvus Lite for better performance, scalability, and persistence. Run the FastAPI backend behind a reverse proxy (e.g., Nginx) with appropriate rate limiting and authentication. The frontend can be built as static files and served from any CDN or static file server.

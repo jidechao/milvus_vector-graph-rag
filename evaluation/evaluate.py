@@ -192,7 +192,7 @@ def calculate_recall(
     """
     recall = {}
     for k in k_list:
-        hits = sum(1 for item in retrieved_items[:k] if item in gold_items)
+        hits = len(set(retrieved_items[:k]) & gold_items)
         recall[k] = hits / len(gold_items) if gold_items else 0.0
     return recall
 
@@ -254,6 +254,10 @@ class VectorGraphRAGEvaluator:
         embedding_model: Optional[str] = None,
         embedding_instruction: Optional[str] = None,
         embedding_instruction_template: Optional[str] = None,
+        reranker_provider: Optional[str] = None,
+        jev_model: Optional[str] = None,
+        jev_threshold: float = 0.5,
+        reranker_model: Optional[str] = None,
     ):
         """
         Initialize the evaluator.
@@ -272,11 +276,14 @@ class VectorGraphRAGEvaluator:
             entity_similarity_threshold: Similarity threshold for entity retrieval (default: 0.9)
             relation_similarity_threshold: Similarity threshold for relation retrieval (default: -1)
             relation_number_threshold: Max expanded relations, eviction if exceeded (default: 1000)
-            llm_model: LLM model for reranking (default: gpt-4o-mini)
+            llm_model: LLM model for reranking (default: gpt-6-luna)
             use_llm_cache: Whether to use LLM response caching (default: True)
             embedding_model: Embedding model to use (e.g., facebook/contriever, text-embedding-3-large)
             embedding_instruction: Instruction for embedding model (for BGE/Qwen3 style models)
             embedding_instruction_template: Instruction template style (bge or qwen3)
+            reranker_provider: Relation reranker backend (llm or jev)
+            jev_model: Jev model version
+            jev_threshold: Inclusive relation score threshold for Jev
         """
         self.embedding_model = embedding_model
         self.embedding_instruction = embedding_instruction
@@ -299,6 +306,10 @@ class VectorGraphRAGEvaluator:
         collection_prefix = f"ds_{dataset_name}"
         settings = Settings(
             milvus_uri=self.milvus_uri,
+            **({"reranker_provider": reranker_provider} if reranker_provider is not None else {}),
+            reranker_model=reranker_model,
+            **({"jev_model": jev_model} if jev_model is not None else {}),
+            jev_threshold=jev_threshold,
             collection_prefix=collection_prefix,  # Use dataset name as collection prefix
         )
         if milvus_db:
@@ -391,7 +402,7 @@ class VectorGraphRAGEvaluator:
             extracted_docs = load_extracted_triplets(self.dataset_name, self.data_dir)
             documents = build_documents_from_triplets(extracted_docs)
             print(f"Built {len(documents)} documents from triplets")
-            self.rag.add_documents_with_triplets(documents, show_progress=True)
+            self.rag.rebuild_documents_with_triplets(documents, show_progress=True)
         else:
             passages = []
             for item in self.corpus:
@@ -401,7 +412,7 @@ class VectorGraphRAGEvaluator:
                     passage = str(item)
                 passages.append(passage)
             print(f"Auto triplet extraction for {len(passages)} passages...")
-            self.rag.add_texts(passages, show_progress=True)
+            self.rag.rebuild_texts(passages, show_progress=True)
 
         # Get stats from extraction result
         stats = self.rag.get_stats()
@@ -413,6 +424,7 @@ class VectorGraphRAGEvaluator:
         use_reranking: bool = True,
         k_list: List[int] = [1, 2, 5, 10, 15, 20],
         method: str = "both",
+        sample_manifest: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run evaluation.
@@ -422,11 +434,30 @@ class VectorGraphRAGEvaluator:
             use_reranking: Whether to use LLM reranking
             k_list: List of k values for recall computation
             method: Retrieval method - 'both', 'graph', or 'naive'
+            sample_manifest: Optional exact source-row selection manifest
 
         Returns:
             Dict with evaluation results
         """
-        samples = self.questions[:max_samples] if max_samples else self.questions
+        indexed_samples = list(enumerate(self.questions))
+        if sample_manifest:
+            with open(sample_manifest) as f:
+                manifest = json.load(f)["samples"][self.dataset_name]
+            indexed_samples = []
+            seen = set()
+            for row in manifest:
+                index = row["index"]
+                if not isinstance(index, int) or index < 0 or index >= len(self.questions) or index in seen:
+                    raise ValueError("Invalid or repeated manifest row index")
+                sample = self.questions[index]
+                if str(sample.get("_id", sample.get("id", index))) != str(row["id"]):
+                    raise ValueError(f"Manifest ID mismatch at row {index}")
+                if sample["question"] != row["query"]:
+                    raise ValueError(f"Manifest question mismatch at row {index}")
+                indexed_samples.append((index, sample))
+                seen.add(index)
+        if max_samples is not None:
+            indexed_samples = indexed_samples[:max_samples]
 
         run_graph = method in ["both", "graph"]
         run_naive = method in ["both", "naive"]
@@ -437,11 +468,11 @@ class VectorGraphRAGEvaluator:
 
         results = []
 
-        for idx, sample in tqdm(
-            enumerate(samples), total=len(samples), desc=f"Evaluating ({method})"
+        for idx, (source_index, sample) in tqdm(
+            enumerate(indexed_samples), total=len(indexed_samples), desc=f"Evaluating ({method})"
         ):
             question = sample["question"]
-            sample_id = sample.get("_id", sample.get("id", idx))
+            sample_id = sample.get("_id", sample.get("id", source_index))
 
             # Get gold items
             gold_items = get_gold_items(sample, self.dataset_name)
@@ -489,15 +520,16 @@ class VectorGraphRAGEvaluator:
                 total_recall_naive[k] += recall_naive[k]
 
             result_entry = {
+                "index": source_index,
                 "id": sample_id,
                 "question": question,
                 "gold_items": list(gold_items),
             }
             if run_graph:
-                result_entry["graph_retrieved"] = graph_titles[:5]
+                result_entry["graph_retrieved"] = graph_titles[: self.top_k]
                 result_entry["recall_graph"] = recall_graph
             if run_naive:
-                result_entry["naive_retrieved"] = naive_titles[:5]
+                result_entry["naive_retrieved"] = naive_titles[: self.top_k]
                 result_entry["recall_naive"] = recall_naive
 
             results.append(result_entry)
@@ -526,6 +558,8 @@ class VectorGraphRAGEvaluator:
 
         # Final results
         n = len(results)
+        if not n:
+            raise ValueError("No evaluable samples selected")
         final_recall_graph = (
             {k: total_recall_graph[k] / n for k in k_list} if run_graph else {}
         )
@@ -537,6 +571,14 @@ class VectorGraphRAGEvaluator:
             "dataset": self.dataset_name,
             "num_samples": n,
             "method": method,
+            "protocol": {
+                "relation_order": "reranker order, then first-seen passage deduplication",
+                "reranker_provider": self.rag.settings.reranker_provider,
+                "reranking_enabled": use_reranking,
+                "jev_model": self.rag.settings.jev_model if self.rag.settings.reranker_provider == "jev" else None,
+                "jev_threshold": self.rag.settings.jev_threshold if self.rag.settings.reranker_provider == "jev" else None,
+                "sample_manifest": sample_manifest,
+            },
             "recall_graph_rag": final_recall_graph,
             "recall_naive_rag": final_recall_naive,
             "results": results,
@@ -656,8 +698,8 @@ def main():
     parser.add_argument(
         "--llm-model",
         type=str,
-        default="gpt-4o-mini",
-        help="LLM model for reranking (default: gpt-4o-mini)",
+        default="gpt-6-luna",
+        help="LLM model for reranking (default: gpt-6-luna)",
     )
     parser.add_argument(
         "--no-llm-cache",
@@ -684,6 +726,11 @@ def main():
         help="Instruction template style (auto-set for BGE models if not specified)",
     )
 
+    parser.add_argument("--reranker-provider", choices=["llm", "jev"], default=None)
+    parser.add_argument("--reranker-model", help="Model name supported by your provider, or jev-1.13.0")
+    parser.add_argument("--jev-model", default=None, help="Legacy Jev model override")
+    parser.add_argument("--jev-threshold", type=float, default=0.5)
+    parser.add_argument("--sample-manifest", help="JSON manifest with dataset row indices, IDs and questions")
     args = parser.parse_args()
 
     # Auto-set BGE instruction if using BGE model and no instruction specified
@@ -723,6 +770,10 @@ def main():
         relation_number_threshold=args.relation_number_threshold,
         llm_model=args.llm_model,
         use_llm_cache=not args.no_llm_cache,
+        reranker_provider=args.reranker_provider,
+        reranker_model=args.reranker_model,
+        jev_model=args.jev_model,
+        jev_threshold=args.jev_threshold,
         embedding_model=args.embedding_model,
         embedding_instruction=args.embedding_instruction,
         embedding_instruction_template=args.embedding_instruction_template,
@@ -736,6 +787,7 @@ def main():
         max_samples=args.max_samples,
         use_reranking=not args.no_rerank,
         method=args.method,
+        sample_manifest=args.sample_manifest,
     )
 
     # Print and log results

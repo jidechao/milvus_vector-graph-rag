@@ -3,8 +3,6 @@ import { ChevronDown, ChevronRight, FileText, Copy, Check } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/utils/cn'
 import { useSearchStore } from '@/stores/searchStore'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 
 function AnswerPanel() {
   const { result, isSearching } = useSearchStore()
@@ -37,13 +35,11 @@ function AnswerPanel() {
                 <div className="h-4 bg-slate-100 rounded animate-pulse w-1/2" />
               </div>
             ) : result?.answer ? (
-              <div className="prose prose-slate max-w-none prose-p:leading-relaxed prose-pre:bg-slate-50 prose-pre:text-slate-800 prose-pre:border prose-pre:border-slate-200">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {result.answer}
-                </ReactMarkdown>
-              </div>
+              <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">
+                {result.answer}
+              </p>
             ) : (
-              <p className="text-slate-400 italic">尚未生成答案</p>
+              <p className="text-slate-400 italic">No answer generated</p>
             )}
           </div>
 
@@ -56,7 +52,7 @@ function AnswerPanel() {
                   ? 'bg-emerald-50 text-emerald-600'
                   : 'hover:bg-slate-100 text-slate-400'
               )}
-              title={copied ? '已复制!' : '复制答案'}
+              title={copied ? 'Copied!' : 'Copy answer'}
             >
               {copied ? (
                 <Check className="w-4 h-4" />
@@ -81,7 +77,7 @@ function AnswerPanel() {
               <ChevronRight className="w-4 h-4" />
             )}
             <FileText className="w-4 h-4" />
-            <span>{result.retrieved_passages.length} 个来源</span>
+            <span>{result.retrieved_passages.length} sources</span>
           </button>
 
           <AnimatePresence>
@@ -100,7 +96,7 @@ function AnswerPanel() {
                       className="p-3 bg-slate-50 rounded-md text-sm text-slate-600"
                     >
                       <div className="text-xs text-slate-400 mb-1">
-                        来源 {index + 1}
+                        Source {index + 1}
                       </div>
                       <p className="line-clamp-4">{passage}</p>
                     </div>

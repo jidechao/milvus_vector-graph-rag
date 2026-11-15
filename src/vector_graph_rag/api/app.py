@@ -9,25 +9,22 @@ Provides RESTful API endpoints for:
 - Graph exploration (stats, neighbors)
 """
 
-import json
-import logging
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vector_graph_rag import VectorGraphRAG, __version__
-from vector_graph_rag.config import Settings, get_settings
+from vector_graph_rag.config import ModelConfig, Settings, get_settings
 from vector_graph_rag.graph.graph import Graph
+from vector_graph_rag.observability import observability_context, set_span_attributes, start_span
 from vector_graph_rag.storage.milvus import MilvusStore
-
-logger = logging.getLogger(__name__)
 
 # ==================== Request/Response Schemas ====================
 
@@ -42,10 +39,7 @@ class HealthResponse(BaseModel):
 class GraphInfo(BaseModel):
     """Information about a graph."""
 
-    name: str = Field(
-        ...,
-        description='Logical graph id: use "unprefixed" for bare vgrag_* collections; otherwise the Milvus collection_prefix (e.g. "default" for default_vgrag_*)',
-    )
+    name: str = Field(..., description="Graph name (collection prefix)")
     entity_collection: str = Field(..., description="Entity collection name")
     relation_collection: str = Field(..., description="Relation collection name")
     passage_collection: str = Field(..., description="Passage collection name")
@@ -71,6 +65,10 @@ class AddDocumentsRequest(BaseModel):
 
     documents: List[str] = Field(..., description="List of document texts")
     ids: Optional[List[str]] = Field(default=None, description="Optional list of document IDs")
+    metadatas: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Optional metadata for each document",
+    )
     extract_triplets: bool = Field(
         default=True, description="Whether to extract triplets using LLM"
     )
@@ -97,10 +95,16 @@ class ImportRequest(BaseModel):
         examples=["/path/to/doc.pdf", "https://example.com/article"],
     )
     chunk_documents: bool = Field(True, description="Whether to chunk large documents")
-    chunk_size: int = Field(1000, description="Max characters per chunk")
-    chunk_overlap: int = Field(200, description="Overlap between chunks")
+    chunk_size: int = Field(1000, gt=0, description="Max characters per chunk")
+    chunk_overlap: int = Field(200, ge=0, description="Overlap between chunks")
     extract_triplets: bool = Field(True, description="Extract triplets using LLM")
     graph_name: Optional[str] = Field(None, description="Target graph name")
+
+    @model_validator(mode="after")
+    def validate_chunking(self):
+        if self.chunk_documents and self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size.")
+        return self
 
 
 class ImportResponse(BaseModel):
@@ -125,6 +129,10 @@ class QueryRequest(BaseModel):
         default=None, description="Number of relations to retrieve"
     )
     expansion_degree: Optional[int] = Field(default=None, description="Subgraph expansion degree")
+    filter: Optional[str] = Field(
+        default=None,
+        description="Optional Milvus filter expression for document metadata",
+    )
 
 
 class EntitySchema(BaseModel):
@@ -299,12 +307,19 @@ class SettingsResponse(BaseModel):
     """Response for system settings."""
 
     llm_model: str = Field(..., description="LLM model name")
+    embedding_provider: Optional[str] = Field(None, description="Embedding provider name")
     embedding_model: str = Field(..., description="Embedding model name")
     embedding_dimension: int = Field(..., description="Embedding dimension")
     milvus_uri: str = Field(..., description="Milvus connection URI")
     milvus_db: Optional[str] = Field(None, description="Milvus database name")
     openai_api_key_set: bool = Field(..., description="Whether OpenAI API key is configured")
     openai_base_url: Optional[str] = Field(None, description="Custom OpenAI base URL")
+    embedding_api_key_set: bool = Field(
+        default=False, description="Whether an embedding-specific API key is configured"
+    )
+    embedding_base_url: Optional[str] = Field(
+        default=None, description="Custom embedding provider base URL"
+    )
 
 
 # ==================== Application Factory ====================
@@ -337,43 +352,62 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     # Store settings and RAG instances
     app.state.settings = settings or get_settings()
-    app.state.rag_instances: dict = {}  # cache_key -> VectorGraphRAG
-    app.state.graph_instances: dict = {}  # cache_key -> Graph
+    app.state.rag_instances: dict = {}  # graph_name -> VectorGraphRAG
+    app.state.graph_instances: dict = {}  # graph_name -> Graph
 
-    def _resolved_collection_prefix(graph_name: Optional[str]) -> Optional[str]:
-        """
-        Map API graph_name (from GET /graphs) to Milvus collection_prefix.
-
-        - None (query param omitted on /query etc.): use global settings.collection_prefix
-        - \"unprefixed\": bare collections vgrag_* (no prefix), from list_graphs for unprefixed triplet
-        - \"\": treated as unprefixed
-        - any other string (including \"default\"): literal Milvus prefix (e.g. default_vgrag_*)
-        """
-        if graph_name in ("unprefixed", "__unprefixed__", ""):
-            return None
+    def infer_graph_name_from_request(request: Request) -> Optional[str]:
+        """Infer graph context from safe URL structure fields."""
+        graph_name = request.query_params.get("graph_name")
         if graph_name:
             return graph_name
-        return app.state.settings.collection_prefix
 
-    def _graph_instance_cache_key(graph_name: Optional[str]) -> str:
-        p = _resolved_collection_prefix(graph_name)
-        return f"p:{p or ''}"
+        path_parts = request.url.path.strip("/").split("/")
+        if len(path_parts) >= 2 and path_parts[0] == "graph":
+            return path_parts[1]
+        return None
+
+    @app.middleware("http")
+    async def observability_middleware(request: Request, call_next):
+        """Attach request context to downstream spans."""
+        request_id = request.headers.get("x-request-id") or request.headers.get("x-correlation-id")
+        tenant_id = request.headers.get("x-tenant-id")
+        graph_name = infer_graph_name_from_request(request)
+        with observability_context(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            graph_name=graph_name,
+            attributes={
+                "http.request.method": request.method,
+            },
+        ):
+            with start_span(
+                "vgrag.api.request",
+                {
+                    "vgrag.has_request_id": bool(request_id),
+                    "vgrag.has_tenant_id": bool(tenant_id),
+                },
+            ) as span:
+                response = await call_next(request)
+                set_span_attributes(span, {"http.response.status_code": response.status_code})
+                return response
 
     def get_rag(graph_name: Optional[str] = None) -> VectorGraphRAG:
         """Get or create RAG instance for a graph."""
-        key = _graph_instance_cache_key(graph_name)
+        key = graph_name or "default"
         if key not in app.state.rag_instances:
             settings_copy = app.state.settings.model_copy()
-            settings_copy.collection_prefix = _resolved_collection_prefix(graph_name)
+            if graph_name:
+                settings_copy.collection_prefix = graph_name
             app.state.rag_instances[key] = VectorGraphRAG(settings=settings_copy)
         return app.state.rag_instances[key]
 
     def get_graph(graph_name: Optional[str] = None) -> Graph:
         """Get or create Graph instance."""
-        key = _graph_instance_cache_key(graph_name)
+        key = graph_name or "default"
         if key not in app.state.graph_instances:
             settings_copy = app.state.settings.model_copy()
-            settings_copy.collection_prefix = _resolved_collection_prefix(graph_name)
+            if graph_name:
+                settings_copy.collection_prefix = graph_name
             app.state.graph_instances[key] = Graph(settings=settings_copy)
         return app.state.graph_instances[key]
 
@@ -407,13 +441,20 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         """
         settings = app.state.settings
         return SettingsResponse(
-            llm_model=settings.llm_model,
+            llm_model=(
+                settings.llm_model.model
+                if isinstance(settings.llm_model, ModelConfig)
+                else settings.llm_model
+            ),
+            embedding_provider=settings.embedding_provider,
             embedding_model=settings.embedding_model,
             embedding_dimension=settings.embedding_dimension,
             milvus_uri=settings.milvus_uri,
             milvus_db=settings.milvus_db,
             openai_api_key_set=bool(settings.openai_api_key),
             openai_base_url=settings.openai_base_url,
+            embedding_api_key_set=bool(settings.embedding_api_key),
+            embedding_base_url=settings.embedding_base_url,
         )
 
     @app.delete("/graph/{graph_name}", response_model=DeleteResponse, tags=["System"])
@@ -433,12 +474,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 milvus_db=app.state.settings.milvus_db,
             )
 
-            # Clear cached instances for this graph (cache key is resolved prefix, not URL segment)
-            cache_key = _graph_instance_cache_key(graph_name)
-            if cache_key in app.state.rag_instances:
-                del app.state.rag_instances[cache_key]
-            if cache_key in app.state.graph_instances:
-                del app.state.graph_instances[cache_key]
+            # Clear cached instances for this graph
+            if graph_name in app.state.rag_instances:
+                del app.state.rag_instances[graph_name]
+            if graph_name in app.state.graph_instances:
+                del app.state.graph_instances[graph_name]
 
             if deleted:
                 return DeleteResponse(
@@ -478,13 +518,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 }
                 if request.ids and i < len(request.ids):
                     doc_data["id"] = request.ids[i]
+                if request.metadatas and i < len(request.metadatas):
+                    doc_data["metadata"] = request.metadatas[i]
                 documents_with_triplets.append(doc_data)
 
-            result = rag.add_documents_with_triplets(documents_with_triplets, show_progress=False)
+            result = rag.rebuild_documents_with_triplets(
+                documents_with_triplets, show_progress=False
+            )
         else:
-            result = rag.add_texts(
+            result = rag.rebuild_texts(
                 request.documents,
                 ids=request.ids,
+                metadatas=request.metadatas,
                 extract_triplets=request.extract_triplets,
                 show_progress=False,
             )
@@ -533,7 +578,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         rag = get_rag(request.graph_name)
 
         # Add documents to graph
-        result = rag.add_documents(
+        result = rag.rebuild_documents(
             documents=load_result.documents,
             extract_triplets=request.extract_triplets,
             show_progress=False,
@@ -564,6 +609,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         Accepts multipart form upload of files.
         Supported formats: PDF, DOCX, TXT, MD, HTML
         """
+        if chunk_documents and (
+            chunk_size <= 0 or chunk_overlap < 0 or chunk_overlap >= chunk_size
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="chunk_size must be greater than 0 and chunk_overlap must satisfy 0 <= chunk_overlap < chunk_size.",
+            )
+
         from vector_graph_rag.loaders import DocumentImporter
 
         temp_paths = []
@@ -599,7 +652,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             rag = get_rag(graph_name)
 
             # Add documents to graph
-            result = rag.add_documents(
+            result = rag.rebuild_documents(
                 documents=load_result.documents,
                 extract_triplets=extract_triplets,
                 show_progress=False,
@@ -644,6 +697,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             entity_top_k=request.entity_top_k,
             relation_top_k=request.relation_top_k,
             expansion_degree=request.expansion_degree,
+            filter=request.filter,
         )
 
         # Convert subgraph to schema if available
@@ -746,43 +800,6 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             eviction_result=eviction_result_schema,
         )
 
-    @app.post("/query/stream", tags=["Query"])
-    async def query_stream(
-        request: QueryRequest,
-        graph_name: Optional[str] = Query(default=None, description="Graph name to use"),
-    ):
-        """
-        Stream query progress and answer chunks using Server-Sent Events (SSE).
-
-        Event format:
-        - event: status / answer_chunk / done / error
-        - data: JSON payload
-        """
-        rag = get_rag(graph_name)
-
-        def format_sse(event_type: str, payload: Dict[str, Any]) -> str:
-            return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-        def event_generator():
-            try:
-                for event in rag.query_stream(
-                    question=request.question,
-                    use_reranking=request.use_reranking,
-                    entity_top_k=request.entity_top_k,
-                    relation_top_k=request.relation_top_k,
-                    expansion_degree=request.expansion_degree,
-                ):
-                    event_type = str(event.get("type", "message"))
-                    yield format_sse(event_type, event)
-            except Exception as e:
-                yield format_sse("error", {"type": "error", "message": str(e)})
-
-        return StreamingResponse(
-            event_generator(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-        )
-
     # ==================== Graph Exploration ====================
 
     @app.get("/graph/{graph_name}/stats", response_model=GraphStatsResponse, tags=["Graph"])
@@ -802,15 +819,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 relation_count=stats.get("relation_count", 0),
                 passage_count=stats.get("passage_count", 0),
             )
-        except Exception as e:
-            # Log root cause (previously swallowed → UI always showed zeros)
-            logger.warning("get_graph_stats failed for graph_name=%r: %s", graph_name, e)
-            return GraphStatsResponse(
-                graph_name=graph_name,
-                entity_count=0,
-                relation_count=0,
-                passage_count=0,
-            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail="Failed to retrieve graph statistics."
+            ) from exc
 
     @app.get(
         "/graph/{graph_name}/neighbors/{entity_id}", response_model=NeighborResponse, tags=["Graph"]

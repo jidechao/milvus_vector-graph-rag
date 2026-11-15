@@ -25,8 +25,8 @@ function ProcessTimeline() {
   if (timelineSteps.length === 0 && !isSearching) {
     return (
       <div className="p-4 text-center text-slate-500">
-        <p className="text-sm">暂无搜索结果</p>
-        <p className="text-xs mt-1">输入问题以查看检索过程</p>
+        <p className="text-sm">No search results yet</p>
+        <p className="text-xs mt-1">Enter a query to see the retrieval process</p>
       </div>
     )
   }
@@ -35,7 +35,7 @@ function ProcessTimeline() {
     <div className="p-2 space-y-1">
       <div className="px-2 py-1 mb-2">
         <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-          检索过程
+          Retrieval Process
         </h3>
       </div>
 
@@ -57,7 +57,7 @@ function ProcessTimeline() {
             className="flex items-center gap-3 px-3 py-2 text-slate-500"
           >
             <Loader2 className="w-4 h-4 animate-spin" />
-            <span className="text-sm">处理中...</span>
+            <span className="text-sm">Processing...</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -112,10 +112,10 @@ function TimelineStepItem({ step, index, isActive, onClick }: TimelineStepItemPr
         {step.stats && step.status !== 'pending' && (
           <div className="flex items-center gap-3 mt-1">
             <span className="text-xs text-slate-400">
-              {step.stats.entityCount} 实体
+              {step.stats.entityCount} entities
             </span>
             <span className="text-xs text-slate-400">
-              {step.stats.relationCount} 关系
+              {step.stats.relationCount} relations
             </span>
           </div>
         )}

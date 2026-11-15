@@ -20,6 +20,24 @@
     pip install "vector-graph-rag[loaders]"
     ```
 
+=== "With local embeddings"
+
+    ```bash
+    pip install "vector-graph-rag[hf]"
+    ```
+
+=== "With all embedding providers"
+
+    ```bash
+    pip install "vector-graph-rag[all]"
+    ```
+
+=== "With observability"
+
+    ```bash
+    pip install "vector-graph-rag[observability]"
+    ```
+
 !!! note "Prerequisites"
     - Python 3.9+
     - An OpenAI API key (set `OPENAI_API_KEY` environment variable)
@@ -31,7 +49,7 @@ from vector_graph_rag import VectorGraphRAG
 
 rag = VectorGraphRAG()  # reads OPENAI_API_KEY from environment
 
-rag.add_texts([
+rag.rebuild_texts([
     "Albert Einstein developed the theory of relativity.",
     "The theory of relativity revolutionized our understanding of space and time.",
 ])
@@ -51,6 +69,7 @@ print(result.answer)
 rag = VectorGraphRAG(
     milvus_uri="./my_data.db",                    # local file (Milvus Lite)
     llm_model="gpt-4o",                           # LLM for extraction and reranking
+    embedding_provider="openai",                  # embedding provider
     embedding_model="text-embedding-3-large",      # embedding model
 )
 ```
@@ -120,10 +139,13 @@ finance_rag = VectorGraphRAG(milvus_uri="./data.db", collection_prefix="finance"
 
 ## Adding Documents
 
+!!! warning "Full rebuild vs incremental updates"
+    `add_texts()`, `add_documents()`, and `add_documents_with_triplets()` rebuild the full knowledge base for the current collection prefix. These legacy convenience APIs are planned for removal in v1.0.0. Use `rebuild_texts()`, `rebuild_documents()`, or `rebuild_documents_with_triplets()` for full refreshes. For source create/update/delete flows, use `upsert_documents_by_source()` and `delete_documents_by_source()`.
+
 ### From Text Strings
 
 ```python
-rag.add_texts([
+rag.rebuild_texts([
     "Einstein developed relativity at Princeton.",
     "The theory changed modern physics.",
 ])
@@ -134,7 +156,7 @@ rag.add_texts([
 Skip LLM extraction if you already have knowledge graph triplets:
 
 ```python
-rag.add_documents_with_triplets([
+rag.rebuild_documents_with_triplets([
     {
         "passage": "Einstein developed relativity at Princeton.",
         "triplets": [
@@ -160,11 +182,83 @@ result = importer.import_sources([
 ])
 
 rag = VectorGraphRAG(milvus_uri="./my_graph.db")
-rag.add_documents(result.documents, extract_triplets=True)
+rag.rebuild_documents(result.documents, extract_triplets=True)
 ```
 
 !!! warning "Loader dependencies"
-    Install with `pip install "vector-graph-rag[loaders]"` to enable URL fetching and document conversion.
+    Install with `uv add "vector-graph-rag[loaders]"` to enable URL fetching and document conversion.
+
+To use a different local parser, pass a converter into `DocumentImporter`:
+
+```python
+from vector_graph_rag.loaders import DoclingConverter, DocumentImporter
+
+importer = DocumentImporter(
+    converter=DoclingConverter(),
+    chunk_size=1000,
+    chunk_overlap=200,
+)
+result = importer.import_sources(["/path/to/document.pdf"])
+```
+
+Install Docling support with `uv add "vector-graph-rag[docling]"`.
+
+### Incremental Updates
+
+Use `upsert_documents_by_source()` when a source file, page, or message is created or modified. In Vector Graph RAG, a `Document` is a passage/chunk, and `metadata["source"]` identifies the source object whose chunks should be replaced.
+
+For parser and loader workflows, attach the same stable source value to every
+chunk produced from one file, page, or message. See
+[Incremental Updates](guides/incremental-updates.md) for the full source-level CUD and
+retry pattern.
+
+```python
+from langchain_core.documents import Document
+
+rag.upsert_documents_by_source(
+    documents=[
+        Document(
+            page_content="Einstein developed relativity at Princeton.",
+            metadata={
+                "source": "file:file-123",
+                "triplets": [
+                    ["Einstein", "developed", "relativity"],
+                    ["Einstein", "worked at", "Princeton"],
+                ],
+            },
+        )
+    ],
+    extract_triplets=False,
+)
+
+rag.delete_documents_by_source("file:file-123")
+```
+
+!!! warning "v0.2.0 migration"
+    `upsert_documents(document_id=...)` and `delete_documents(document_id)` were removed because `Document` means passage/chunk in this project. Use `upsert_documents_by_source()` and `delete_documents_by_source()` with a stable `metadata["source"]` value instead.
+
+!!! note "Consistency model"
+    Incremental updates perform a source-level cascade across passages, entities, and relations. They are not transactionally atomic, and queries may observe intermediate state if a write is interrupted. If an upsert or delete fails, rerun the same operation for the same source to converge the source back to a consistent state. Avoid concurrently mutating the same collection prefix during an update.
+
+## Observability
+
+Install `vector-graph-rag[observability]` to enable OpenTelemetry trace instrumentation. The library creates spans for ingestion, loading, embeddings, Milvus operations, retrieval, and generation, while your application configures the OpenTelemetry SDK and exporter.
+
+```python
+from vector_graph_rag import VectorGraphRAG, observability_context
+
+rag = VectorGraphRAG(collection_prefix="my_project")
+
+with observability_context(
+    request_id="req-123",
+    tenant_id="tenant-a",
+    graph_name="my_project",
+    source="file-123",
+):
+    rag.upsert_documents_by_source(chunks, source="file-123")
+```
+
+See [Observability](guides/observability.md) for setup, span coverage, and data-safety notes.
 
 ## Querying
 
@@ -205,12 +299,12 @@ uv run uvicorn vector_graph_rag.api.app:app --host 0.0.0.0 --port 8000
 
 Interactive docs available at `http://localhost:8000/docs`.
 
-See the [REST API Reference](rest-api.md) for full endpoint documentation.
+See the [REST API Reference](reference/rest-api.md) for full endpoint documentation.
 
 ## Next Steps
 
-- **[How It Works](how-it-works.md)** — Understand the indexing and query pipelines
-- **[Design Philosophy](design-philosophy.md)** — Why pure vector search instead of graph databases
-- **[Python API](python-api.md)** — Complete API reference with all parameters
+- **[How It Works](architecture/how-it-works.md)** — Understand the indexing and query pipelines
+- **[Design Philosophy](architecture/design-philosophy.md)** — Why pure vector search instead of graph databases
+- **[Python API](reference/python-api.md)** — Complete API reference with all parameters
 - **[Use Cases](use-cases.md)** — Domain-specific examples and best practices
-- **[Frontend](frontend.md)** — Interactive graph visualization
+- **[Frontend](guides/frontend.md)** — Interactive graph visualization

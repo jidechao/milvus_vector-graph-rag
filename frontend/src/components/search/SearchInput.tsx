@@ -1,114 +1,42 @@
-import { useState, useCallback, useRef } from 'react'
-import { Search, Loader2, X, Zap } from 'lucide-react'
+import { useState, useCallback } from 'react'
+import { Search, Loader2, X } from 'lucide-react'
 import { cn } from '@/utils/cn'
 import { useSearchStore } from '@/stores/searchStore'
 import { useGraphStore } from '@/stores/graphStore'
 import { useDatasetStore } from '@/stores/datasetStore'
 import { useSearch } from '@/api/queries'
-import { api } from '@/api/client'
-import type { QueryResponse } from '@/types/api'
 
 function SearchInput() {
   const [inputValue, setInputValue] = useState('')
-  const [useStream, setUseStream] = useState(false)
   const { setQuery, setSearching, setResult, setError, reset } = useSearchStore()
   const { setSubgraph, clearGraph } = useGraphStore()
   const { currentDataset } = useDatasetStore()
-  const abortControllerRef = useRef<(() => void) | null>(null)
 
   const searchMutation = useSearch()
 
   const handleSearch = useCallback(async () => {
     const query = inputValue.trim()
-    if (!query || searchMutation.isPending || abortControllerRef.current) return
+    if (!query || searchMutation.isPending) return
 
     setQuery(query)
     setSearching(true)
     setError(null)
     clearGraph()
 
-    if (useStream) {
-      const partialResult: Partial<QueryResponse> = {
+    try {
+      const result = await searchMutation.mutateAsync({
         question: query,
-        answer: '',
-        query_entities: [],
-        retrieved_passages: [],
-        stats: {}
-      }
-
-      const cleanup = api.queryStream(
-        { question: query, graph_name: currentDataset || undefined },
-        (event) => {
-          if (event.type === 'status') {
-            // Update partial stats/entities if needed
-            const eventData = event.data as { query_entities?: string[] } | undefined
-            if (eventData?.query_entities) {
-              partialResult.query_entities = eventData.query_entities
-            }
-          } else if (event.type === 'answer_chunk') {
-            const deltaText = String(
-              (event as Record<string, unknown>).chunk ??
-              (event as Record<string, unknown>).delta ??
-              ''
-            )
-            partialResult.answer = (partialResult.answer || '') + deltaText
-            setResult({ ...partialResult } as QueryResponse)
-          } else if (event.type === 'done') {
-            // Final complete result
-            if (event.result) {
-              const fullResult = event.result as QueryResponse
-              setResult(fullResult)
-              setSubgraph(fullResult.subgraph || null, fullResult.retrieval_detail, fullResult.rerank_result)
-            } else {
-              // Fallback: stream done event has no full graph payload,
-              // fetch complete query result once for graph/timeline rendering.
-              api
-                .query({ question: query, graph_name: currentDataset || undefined })
-                .then((fullResult) => {
-                  setResult(fullResult)
-                  setSubgraph(
-                    fullResult.subgraph || null,
-                    fullResult.retrieval_detail,
-                    fullResult.rerank_result
-                  )
-                })
-                .catch(() => {})
-            }
-            setSearching(false)
-            abortControllerRef.current = null
-          } else if (event.type === 'error') {
-            setError(event.message || 'Stream error')
-            setSearching(false)
-            abortControllerRef.current = null
-          }
-        },
-        (error) => {
-          setError(error.message || 'Stream failed')
-          setSearching(false)
-          abortControllerRef.current = null
-        },
-        () => {
-          setSearching(false)
-          abortControllerRef.current = null
-        }
-      )
-      abortControllerRef.current = cleanup
-    } else {
-      try {
-        const result = await searchMutation.mutateAsync({
-          question: query,
-          graph_name: currentDataset || undefined,
-        })
-        setResult(result)
-        setSubgraph(result.subgraph || null, result.retrieval_detail, result.rerank_result)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Search failed'
-        setError(message)
-      } finally {
-        setSearching(false)
-      }
+        graph_name: currentDataset || undefined,
+      })
+      setResult(result)
+      setSubgraph(result.subgraph, result.retrieval_detail, result.rerank_result)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Search failed'
+      setError(message)
+    } finally {
+      setSearching(false)
     }
-  }, [inputValue, useStream, searchMutation, currentDataset, setQuery, setSearching, setResult, setError, setSubgraph, clearGraph])
+  }, [inputValue, searchMutation, currentDataset, setQuery, setSearching, setResult, setError, setSubgraph, clearGraph])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -121,39 +49,22 @@ function SearchInput() {
   )
 
   const handleClear = useCallback(() => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current()
-      abortControllerRef.current = null
-    }
     setInputValue('')
     reset()
     clearGraph()
   }, [reset, clearGraph])
 
-  const isLoading = searchMutation.isPending || !!abortControllerRef.current
+  const isLoading = searchMutation.isPending
 
   return (
-    <div className="relative w-full max-w-2xl mx-auto space-y-2">
-      <div className="flex items-center justify-end gap-2 px-1">
-        <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer hover:text-slate-700 transition-colors">
-          <input
-            type="checkbox"
-            checked={useStream}
-            onChange={(e) => setUseStream(e.target.checked)}
-            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-            disabled={isLoading}
-          />
-          <Zap className={cn("w-3.5 h-3.5", useStream ? "text-amber-500" : "")} />
-          流式响应
-        </label>
-      </div>
+    <div className="relative w-full max-w-2xl mx-auto">
       <div className="relative">
         <input
           type="text"
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="输入您的问题..."
+          placeholder="Enter your question..."
           disabled={isLoading}
           className={cn(
             'w-full px-4 py-3 pr-24',
@@ -175,7 +86,7 @@ function SearchInput() {
               'text-slate-400 hover:text-slate-600 hover:bg-slate-100',
               'transition-colors'
             )}
-            title="清空"
+            title="Clear"
           >
             <X className="w-4 h-4" />
           </button>
@@ -192,7 +103,7 @@ function SearchInput() {
             'disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent',
             'transition-colors'
           )}
-          title="搜索"
+          title="Search"
         >
           {isLoading ? (
             <Loader2 className="w-5 h-5 animate-spin" />
@@ -215,7 +126,7 @@ function QueryEntitiesDisplay() {
     return (
       <div className="mt-2 flex items-center gap-2 text-sm text-slate-500">
         <Loader2 className="w-3 h-3 animate-spin" />
-        <span>正在分析查询...</span>
+        <span>Analyzing query...</span>
       </div>
     )
   }
@@ -224,7 +135,7 @@ function QueryEntitiesDisplay() {
 
   return (
     <div className="mt-2 flex flex-wrap items-center gap-2">
-      <span className="text-xs text-slate-500">实体:</span>
+      <span className="text-xs text-slate-500">Entities:</span>
       {result.query_entities.map((entity, index) => (
         <span
           key={index}
